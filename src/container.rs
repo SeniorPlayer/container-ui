@@ -407,6 +407,141 @@ fn bar_gauge(pct: f64, width: usize) -> String {
     s
 }
 
+/// Network detail: pretty-printed `container network inspect <id>` plus a
+/// header derived from the parsed config (mode, state, subnet, gateway,
+/// nameservers).
+pub async fn network_detail(id: &str) -> Result<String> {
+    let bytes = run(&["network", "inspect", id]).await?;
+    let parsed: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    let v = parsed.get(0).cloned().unwrap_or_else(|| parsed.clone());
+    let pretty = serde_json::to_string_pretty(&v)
+        .unwrap_or_else(|_| String::from_utf8_lossy(&bytes).into_owned());
+
+    let cfg = v.get("config").cloned().unwrap_or(Value::Null);
+    let status = v.get("status").cloned().unwrap_or(Value::Null);
+    let mode = cfg.get("mode").and_then(|x| x.as_str()).unwrap_or("?");
+    let state = v.get("state").and_then(|x| x.as_str()).unwrap_or("?");
+    let plugin = cfg
+        .get("pluginInfo")
+        .and_then(|p| p.get("plugin"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("?");
+    let variant = cfg
+        .get("pluginInfo")
+        .and_then(|p| p.get("variant"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("?");
+    let v4_subnet = status
+        .get("ipv4Subnet")
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+    let v4_gw = status
+        .get("ipv4Gateway")
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+    let v6_subnet = status
+        .get("ipv6Subnet")
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+    let v6_gw = status
+        .get("ipv6Gateway")
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+    let nameservers: Vec<String> = status
+        .get("nameservers")
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut header = String::new();
+    use std::fmt::Write as _;
+    let _ = writeln!(header, "== Network: {id} ==");
+    let _ = writeln!(header, "Mode:        {mode}");
+    let _ = writeln!(header, "State:       {state}");
+    let _ = writeln!(header, "Plugin:      {plugin} ({variant})");
+    if !v4_subnet.is_empty() || !v4_gw.is_empty() {
+        let _ = writeln!(
+            header,
+            "IPv4:        subnet {} · gateway {}",
+            if v4_subnet.is_empty() { "—" } else { v4_subnet },
+            if v4_gw.is_empty() { "—" } else { v4_gw }
+        );
+    }
+    if !v6_subnet.is_empty() || !v6_gw.is_empty() {
+        let _ = writeln!(
+            header,
+            "IPv6:        subnet {} · gateway {}",
+            if v6_subnet.is_empty() { "—" } else { v6_subnet },
+            if v6_gw.is_empty() { "—" } else { v6_gw }
+        );
+    }
+    if !nameservers.is_empty() {
+        let _ = writeln!(header, "Nameservers: {}", nameservers.join(", "));
+    }
+    let _ = writeln!(header, "\n== Inspect ==");
+
+    Ok(format!("{header}{pretty}"))
+}
+
+/// Streaming trivy image scan. Mirrors `spawn_pull` so the modal infra is
+/// shared. Requires `trivy` on PATH; the spawn fails cleanly if not.
+pub fn spawn_trivy(
+    image: String,
+    sink: Arc<Mutex<Vec<String>>>,
+) -> tokio::task::JoinHandle<Result<()>> {
+    tokio::spawn(async move {
+        push(&sink, format!("$ trivy image --quiet --severity HIGH,CRITICAL {image}"));
+        let mut child = match Command::new("trivy")
+            .args(["image", "--quiet", "--severity", "HIGH,CRITICAL", &image])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                push(&sink, format!("✗ failed to spawn trivy: {e}"));
+                push(&sink, "  install with `brew install trivy`".into());
+                return Err(anyhow!(e));
+            }
+        };
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let s1 = sink.clone();
+        let s2 = sink.clone();
+        let t_out = tokio::spawn(async move {
+            if let Some(out) = stdout {
+                let mut lines = BufReader::new(out).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    push(&s1, line);
+                }
+            }
+        });
+        let t_err = tokio::spawn(async move {
+            if let Some(err) = stderr {
+                let mut lines = BufReader::new(err).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    push(&s2, line);
+                }
+            }
+        });
+        let status = child.wait().await?;
+        let _ = t_out.await;
+        let _ = t_err.await;
+        if status.success() {
+            push(&sink, format!("✓ scanned {image}"));
+            Ok(())
+        } else {
+            let msg = format!("✗ trivy exited {status}");
+            push(&sink, msg.clone());
+            Err(anyhow!(msg))
+        }
+    })
+}
+
 /// Pretty-printed `container inspect <id>` JSON. Falls back to raw stdout if
 /// the response isn't valid JSON for any reason.
 pub async fn inspect(id: &str) -> Result<String> {

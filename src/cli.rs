@@ -56,6 +56,9 @@ pub fn dispatch_cli(cli: &Cli) -> Result<Option<i32>> {
     if matches!(verb.as_str(), "tui" | "ui") {
         return Ok(None);
     }
+    if verb == "doctor" {
+        return Ok(Some(crate::doctor::run()));
+    }
     let mapped = translate(verb);
     let rest = &cli.args[1..];
 

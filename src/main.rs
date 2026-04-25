@@ -1,10 +1,12 @@
 mod app;
 mod cli;
 mod container;
+mod doctor;
 mod jsonhl;
 mod prefs;
 mod pullprog;
 mod runtime;
+mod stacks;
 mod theme;
 mod ui;
 
@@ -232,12 +234,20 @@ fn open_context_menu(app: &mut App, x: u16, y: u16) {
         Tab::Images => vec![
             ("Inspect".into(), ContextAction::Inspect),
             ("Pull image…".into(), ContextAction::Pull),
+            ("Trivy scan".into(), ContextAction::TrivyScan),
             ("Delete".into(), ContextAction::Delete),
             ("Refresh".into(), ContextAction::Refresh),
             ("Help".into(), ContextAction::Help),
         ],
         Tab::Volumes | Tab::Networks => vec![
             ("Inspect".into(), ContextAction::Inspect),
+            ("Refresh".into(), ContextAction::Refresh),
+            ("Help".into(), ContextAction::Help),
+        ],
+        Tab::Stacks => vec![
+            ("Inspect".into(), ContextAction::Inspect),
+            ("Up".into(), ContextAction::StackUp),
+            ("Down".into(), ContextAction::StackDown),
             ("Refresh".into(), ContextAction::Refresh),
             ("Help".into(), ContextAction::Help),
         ],
@@ -305,6 +315,9 @@ async fn invoke_context_action(app: &mut App, action: ContextAction) {
             app.mode = Mode::PromptPull;
             app.set_status("Type image reference, Enter to pull");
         }
+        ContextAction::TrivyScan => app.set_status("trivy scan: bind via T key on the row"),
+        ContextAction::StackUp => app.set_status("stack up: press u on the row"),
+        ContextAction::StackDown => app.set_status("stack down: press D on the row"),
         ContextAction::Refresh => {
             app.set_status("Refreshing…");
             app.refresh().await.ok();
@@ -701,6 +714,9 @@ async fn handle_key<B: ratatui::backend::Backend>(
         KeyCode::Up => app.move_up(),
         KeyCode::Char('r') => {
             app.set_status("Refreshing…");
+            if app.tab == Tab::Stacks {
+                app.reload_stacks();
+            }
             app.refresh().await.ok();
             app.set_status("Refreshed.");
         }
@@ -764,6 +780,10 @@ async fn handle_key<B: ratatui::backend::Backend>(
             app.mode = Mode::PromptBuild;
             app.set_status("Build context path, then Tab → tag, Enter to start");
         }
+        KeyCode::Char('T') if app.tab == Tab::Images => start_trivy(app, pull_handle).await,
+        KeyCode::Char('u') if app.tab == Tab::Stacks => start_stack(app, pull_handle, true).await,
+        KeyCode::Char('D') if app.tab == Tab::Stacks => start_stack(app, pull_handle, false).await,
+        KeyCode::Char('l') if app.tab == Tab::Stacks => stack_logs(app, log_handle).await,
         KeyCode::Char(' ') if app.tab == Tab::Containers => {
             app.toggle_mark_current_container();
             app.move_down();
@@ -912,6 +932,7 @@ async fn open_detail(app: &mut App) {
         Tab::Volumes => app
             .selected_row()
             .and_then(|i| app.volumes.get(i).map(|v| v.name.clone())),
+        Tab::Stacks => app.current_stack().map(|s| s.name.clone()),
         Tab::Logs => None,
     };
     let Some(id) = target else {
@@ -921,6 +942,8 @@ async fn open_detail(app: &mut App) {
     app.set_status(format!("inspecting {id}…"));
     let result = match app.tab {
         Tab::Volumes => container::volume_detail(&id).await,
+        Tab::Networks => container::network_detail(&id).await,
+        Tab::Stacks => Ok(stack_detail_text(app)),
         _ => container::inspect(&id).await,
     };
     match result {
@@ -932,6 +955,110 @@ async fn open_detail(app: &mut App) {
         }
         Err(e) => app.set_status(format!("inspect error: {e}")),
     }
+}
+
+fn stack_detail_text(app: &App) -> String {
+    let Some(s) = app.current_stack() else { return "(no stack)".into() };
+    let mut out = String::new();
+    use std::fmt::Write as _;
+    let _ = writeln!(out, "== Stack: {} ==", s.name);
+    if let Some(p) = &s.source {
+        let _ = writeln!(out, "Source:    {}", p.display());
+    }
+    let _ = writeln!(out, "Services:  {}", s.services.len());
+    let _ = writeln!(out, "\n== Services ==");
+    for svc in &s.services {
+        let _ = writeln!(out, "\n  {}", svc.name);
+        let _ = writeln!(out, "    image:    {}", svc.image);
+        if !svc.depends_on.is_empty() {
+            let _ = writeln!(out, "    depends:  {}", svc.depends_on.join(", "));
+        }
+        if let Some(n) = &svc.network {
+            let _ = writeln!(out, "    network:  {n}");
+        }
+        if !svc.ports.is_empty() {
+            let _ = writeln!(out, "    ports:    {}", svc.ports.join(", "));
+        }
+        if !svc.volumes.is_empty() {
+            let _ = writeln!(out, "    volumes:  {}", svc.volumes.join(", "));
+        }
+        if !svc.env.is_empty() {
+            let env: Vec<String> = svc.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            let _ = writeln!(out, "    env:      {}", env.join(", "));
+        }
+    }
+    let _ = writeln!(out, "\n== Run plan (topo) ==");
+    for svc in stacks::topo_order(&s) {
+        let _ = writeln!(
+            out,
+            "  → container {}",
+            stacks::run_args(&s.name, svc).join(" ")
+        );
+    }
+    out
+}
+
+async fn start_trivy(
+    app: &mut App,
+    pull_handle: &mut Option<tokio::task::JoinHandle<Result<()>>>,
+) {
+    let Some(image) = app.current_image_ref() else {
+        app.set_status("No image selected.");
+        return;
+    };
+    if let Ok(mut v) = app.pull_log.lock() { v.clear(); }
+    app.pull_running = true;
+    app.op_kind = OperationKind::Trivy;
+    app.pull_reference = Some(image.clone());
+    app.op_scroll = 0;
+    *pull_handle = Some(container::spawn_trivy(image.clone(), app.pull_log.clone()));
+    app.mode = Mode::PullProgress;
+    app.set_status(format!("scanning {image}…"));
+}
+
+async fn start_stack(
+    app: &mut App,
+    pull_handle: &mut Option<tokio::task::JoinHandle<Result<()>>>,
+    up: bool,
+) {
+    let Some(stack) = app.current_stack() else {
+        app.set_status("No stack selected.");
+        return;
+    };
+    if let Ok(mut v) = app.pull_log.lock() { v.clear(); }
+    app.pull_running = true;
+    app.op_kind = if up { OperationKind::StackUp } else { OperationKind::StackDown };
+    app.pull_reference = Some(stack.name.clone());
+    app.op_scroll = 0;
+    let handle = if up {
+        stacks::spawn_up(stack.clone(), app.pull_log.clone())
+    } else {
+        stacks::spawn_down(stack.clone(), app.pull_log.clone())
+    };
+    *pull_handle = Some(handle);
+    app.mode = Mode::PullProgress;
+    app.set_status(format!(
+        "{} {}…",
+        if up { "starting" } else { "stopping" },
+        stack.name
+    ));
+}
+
+async fn stack_logs(
+    app: &mut App,
+    log_handle: &mut Option<tokio::task::JoinHandle<Result<()>>>,
+) {
+    let Some(stack) = app.current_stack() else {
+        app.set_status("No stack selected.");
+        return;
+    };
+    let Some(svc) = stack.services.first() else {
+        app.set_status("Stack has no services.");
+        return;
+    };
+    let id = stacks::container_name(&stack.name, &svc.name);
+    start_follow(app, log_handle, id);
+    app.set_tab(Tab::Logs);
 }
 
 /// Drop into `container exec -ti <id> /bin/sh` for the selected container.

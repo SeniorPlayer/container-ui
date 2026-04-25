@@ -142,6 +142,7 @@ fn draw_body(f: &mut Frame, app: &mut App, area: Rect) {
         Tab::Images => draw_images(f, app, area),
         Tab::Volumes => draw_volumes(f, app, area),
         Tab::Networks => draw_networks(f, app, area),
+        Tab::Stacks => draw_stacks(f, app, area),
         Tab::Logs => draw_logs(f, app, area),
     }
 }
@@ -449,6 +450,67 @@ fn draw_networks(f: &mut Frame, app: &mut App, area: Rect) {
     let table = Table::new(rows, widths)
         .header(header)
         .block(Block::default().borders(Borders::ALL).title(title))
+        .row_highlight_style(Style::default().bg(Color::DarkGray))
+        .highlight_symbol("▶ ");
+    f.render_stateful_widget(table, area, &mut state);
+}
+
+fn draw_stacks(f: &mut Frame, app: &mut App, area: Rect) {
+    let header = Row::new(vec!["NAME", "SERVICES", "RUNNING", "SOURCE"]).style(header_style());
+    let view = app.view_indices();
+    let running_names: std::collections::HashSet<String> = app
+        .containers
+        .iter()
+        .filter(|c| c.status == "running")
+        .map(|c| c.id.clone())
+        .collect();
+    let rows: Vec<Row> = view
+        .iter()
+        .map(|&i| {
+            let s = &app.stacks[i];
+            let total = s.services.len();
+            let mut up = 0usize;
+            for svc in &s.services {
+                if running_names.contains(&crate::stacks::container_name(&s.name, &svc.name)) {
+                    up += 1;
+                }
+            }
+            let running_style = if up == total && total > 0 {
+                Style::default().fg(app.theme.success).add_modifier(Modifier::BOLD)
+            } else if up == 0 {
+                Style::default().fg(app.theme.muted)
+            } else {
+                Style::default().fg(app.theme.warning)
+            };
+            let src = s
+                .source
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            Row::new(vec![
+                Cell::from(s.name.clone()).style(Style::default().fg(app.theme.info).add_modifier(Modifier::BOLD)),
+                Cell::from(total.to_string()),
+                Cell::from(format!("{up}/{total}")).style(running_style),
+                Cell::from(src).style(Style::default().fg(app.theme.muted)),
+            ])
+        })
+        .collect();
+    let widths = [
+        Constraint::Percentage(20),
+        Constraint::Length(10),
+        Constraint::Length(10),
+        Constraint::Min(20),
+    ];
+    let title = block_title(app, "Stacks", app.stacks.len(), rows.len());
+    let mut state = TableState::default();
+    state.select(Some(app.selected));
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("{title}· u up · D down · Enter detail · l logs (1st svc) ")),
+        )
         .row_highlight_style(Style::default().bg(Color::DarkGray))
         .highlight_symbol("▶ ");
     f.render_stateful_widget(table, area, &mut state);
@@ -905,7 +967,8 @@ fn draw_help_overlay(f: &mut Frame, app: &App, area: Rect) {
             lines.push(section("Images"));
             lines.push(h("p", "Pull image (prompt + progress modal)"));
             lines.push(h("b", "Build image (Ctrl-O opens file picker)"));
-            lines.push(h("P", "Re-attach to backgrounded pull or build"));
+            lines.push(h("T", "Scan with trivy (HIGH+CRITICAL only)"));
+            lines.push(h("P", "Re-attach to backgrounded pull/build/scan"));
         }
         Tab::Volumes => {
             lines.push(section("Volumes"));
@@ -913,7 +976,14 @@ fn draw_help_overlay(f: &mut Frame, app: &App, area: Rect) {
         }
         Tab::Networks => {
             lines.push(section("Networks"));
-            lines.push(h("Enter", "Inspect network JSON"));
+            lines.push(h("Enter", "Detail: subnet/gateway/nameservers + JSON"));
+        }
+        Tab::Stacks => {
+            lines.push(section("Stacks"));
+            lines.push(h("u", "Up — `container run -d` per service in topo order"));
+            lines.push(h("D", "Down — stop+delete every service container"));
+            lines.push(h("Enter", "Detail: source path + service list (inspect)"));
+            lines.push(h("l", "Logs of the stack's first service"));
         }
         Tab::Logs => {
             lines.push(section("Logs"));

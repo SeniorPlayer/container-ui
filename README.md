@@ -76,6 +76,8 @@ cgui tui        # same
 | `Ctrl-O`       | (in Build prompt) open the **file picker** for the build context |
 | `F`            | (Containers) start **follow-mode log streaming** · (Logs) toggle stop/start |
 | `↑` / `↓`      | (in Pull/Build prompts) cycle through **recent presets** |
+| `T`            | (Images) **Trivy scan** of selected image (HIGH+CRITICAL) |
+| `u` / `D`      | (Stacks) **Up** / **Down** the selected stack       |
 
 On the Logs tab `/` enters **search-as-you-type**: matches highlight in yellow as you type, with a live match counter in the title (`Logs · foo · search:err  (4 matches)`). Enter exits the input but keeps the highlight; `Esc` clears.
 
@@ -150,6 +152,53 @@ The pull and build prompts remember your last 10 invocations. `↑` cycles into 
 
 Press `F` on a Containers row to start a `container logs -f` stream into the Logs tab; press `F` again on the Logs tab to stop. The header colors green and shows `● follow` while live; auto-tails when scroll is at the top, otherwise pins to your scroll position. Combined with `/` + `Ctrl-R`, you get live regex log monitoring.
 
+### Stacks
+
+The **Stacks** tab is a tiny compose-style runner. Each stack lives in `~/.config/cgui/stacks/<name>.toml`:
+
+```toml
+name = "myapp"
+
+[[service]]
+name = "db"
+image = "docker.io/pgvector/pgvector:pg16"
+env = { POSTGRES_USER = "test", POSTGRES_PASSWORD = "test" }
+ports = ["15432:5432"]
+volumes = ["dbdata:/var/lib/postgresql/data"]
+
+[[service]]
+name = "api"
+image = "myapp/api:latest"
+network = "default"
+depends_on = ["db"]
+ports = ["8080:8080"]
+```
+
+In the TUI: `u` brings the stack up (`container run -d --name <stack>_<service> …` per service in topological dependency order), `D` tears it down (stop + delete every service container, in reverse). Both stream into the same modal as pull/build, so you see exactly what's executing. The `RUNNING` column shows `<up>/<total>` per stack with traffic-light coloring.
+
+A starter `example.toml` is dropped on first run. The Stacks tab's `Enter` opens a detail pane showing the parsed services and the exact `container run` plan.
+
+### `cgui doctor`
+
+```
+$ cgui doctor
+== cgui doctor ==
+✓ active profile: container → container
+✓ `container` resolves to /usr/local/bin/container
+✓ `container --version` → container CLI version 0.11.0
+✓ container system status: running
+! no profiles.toml at ~/.config/cgui/profiles.toml (using built-in default)
+✓ state.json at ~/.config/cgui/state.json parses cleanly
+! trivy not on PATH (image scan disabled — `brew install trivy`)
+== all checks passed ==
+```
+
+Exit code 0 if everything's green, 1 otherwise. Useful for CI or scripting.
+
+### Trivy image scan
+
+If [trivy](https://github.com/aquasecurity/trivy) is on `$PATH`, press `T` on an Images row (or right-click → Trivy scan). Runs `trivy image --quiet --severity HIGH,CRITICAL <ref>` and streams the report into the same modal as pull/build. `Esc` backgrounds it; `P` re-attaches.
+
 In the Detail pane: `↑↓`/`PgUp`/`PgDn` scroll, `Esc` closes.
 In the Pull modal: `Esc` hides; pull keeps running in the background and the status bar reports completion.
 
@@ -219,12 +268,15 @@ State refresh is async and best-effort: if one source (e.g. `volume ls`) fails, 
 | Recent pull/build presets (↑↓ in prompts)             | ✅ shipped | 0.8.0          |
 | Follow-mode log streaming (`F`) with auto-tail        | ✅ shipped | 0.8.0          |
 | Configurable resource alerts (`[alerts]` in theme)    | ✅ shipped | 0.8.0          |
+| `cgui doctor` environment health check                | ✅ shipped | 0.9.0          |
+| Network detail pane (mode/state/subnets/nameservers)  | ✅ shipped | 0.9.0          |
+| Trivy image scan (`T` on Images tab)                  | ✅ shipped | 0.9.0          |
+| **Stacks** tab — compose-style multi-service sessions | ✅ shipped | 0.9.0          |
 | Optional GUI front end (Tauri)                        | 🟡 planned | —              |
 
 ## Roadmap
 
 - Optional GUI front end (Tauri) sharing the same `container.rs` core
-- Compose-style multi-container session management
-- `cgui doctor` — diagnose common runtime/CLI issues
-- Image vulnerability scan integration (e.g. trivy)
-- Network detail pane with interface stats and route table
+- Stack edit/create from the TUI (currently file-based only)
+- Trivy results parser → severity-grouped table view (currently raw text)
+- Compose-format import (translate docker-compose.yml → cgui stack TOML)

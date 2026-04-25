@@ -18,6 +18,7 @@ pub enum Tab {
     Volumes,
     Networks,
     Logs,
+    Stacks,
 }
 
 impl Tab {
@@ -26,6 +27,7 @@ impl Tab {
         Tab::Images,
         Tab::Volumes,
         Tab::Networks,
+        Tab::Stacks,
         Tab::Logs,
     ];
     pub fn label(self) -> &'static str {
@@ -34,6 +36,7 @@ impl Tab {
             Tab::Images => "Images",
             Tab::Volumes => "Volumes",
             Tab::Networks => "Networks",
+            Tab::Stacks => "Stacks",
             Tab::Logs => "Logs",
         }
     }
@@ -44,6 +47,7 @@ impl Tab {
             Tab::Images => "images",
             Tab::Volumes => "volumes",
             Tab::Networks => "networks",
+            Tab::Stacks => "stacks",
             Tab::Logs => "logs",
         }
     }
@@ -80,6 +84,9 @@ pub enum Mode {
 pub enum OperationKind {
     Pull,
     Build,
+    Trivy,
+    StackUp,
+    StackDown,
 }
 
 impl OperationKind {
@@ -87,18 +94,27 @@ impl OperationKind {
         match self {
             OperationKind::Pull => "pull",
             OperationKind::Build => "build",
+            OperationKind::Trivy => "scan",
+            OperationKind::StackUp => "stack up",
+            OperationKind::StackDown => "stack down",
         }
     }
     pub fn participle(self) -> &'static str {
         match self {
             OperationKind::Pull => "Pulling",
             OperationKind::Build => "Building",
+            OperationKind::Trivy => "Scanning",
+            OperationKind::StackUp => "Bringing up",
+            OperationKind::StackDown => "Tearing down",
         }
     }
     pub fn done(self) -> &'static str {
         match self {
             OperationKind::Pull => "Pulled",
             OperationKind::Build => "Built",
+            OperationKind::Trivy => "Scanned",
+            OperationKind::StackUp => "Stack up",
+            OperationKind::StackDown => "Stack down",
         }
     }
 }
@@ -121,6 +137,9 @@ pub enum ContextAction {
     Delete,
     Exec,
     Pull,
+    TrivyScan,
+    StackUp,
+    StackDown,
     Refresh,
     ToggleAll,
     Help,
@@ -136,6 +155,7 @@ impl SortKey {
             Tab::Images => &["reference", "size"],
             Tab::Volumes => &["name", "driver"],
             Tab::Networks => &["id", "state"],
+            Tab::Stacks => &["name"],
             Tab::Logs => &[],
         }
     }
@@ -249,6 +269,9 @@ pub struct App {
     pub typed_pull: String,
     pub typed_build_path: String,
     pub typed_build_tag: String,
+
+    /// Loaded compose-style stacks from `~/.config/cgui/stacks/*.toml`.
+    pub stacks: Vec<crate::stacks::Stack>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -348,6 +371,10 @@ impl App {
             typed_pull: String::new(),
             typed_build_path: String::new(),
             typed_build_tag: String::new(),
+            stacks: {
+                let _ = crate::stacks::ensure_sample();
+                crate::stacks::load_all()
+            },
         }
     }
 
@@ -587,6 +614,15 @@ impl App {
                 },
             ),
             Tab::Logs => vec![],
+            Tab::Stacks => sorted(
+                self.stacks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| matches(&s.name))
+                    .map(|(i, _)| i)
+                    .collect(),
+                |&i| self.stacks[i].name.clone(),
+            ),
         }
     }
 
@@ -617,6 +653,13 @@ impl App {
     pub fn current_image_ref(&self) -> Option<String> {
         self.selected_row()
             .and_then(|i| self.images.get(i).map(|im| im.reference.clone()))
+    }
+    pub fn current_stack(&self) -> Option<crate::stacks::Stack> {
+        self.selected_row()
+            .and_then(|i| self.stacks.get(i).cloned())
+    }
+    pub fn reload_stacks(&mut self) {
+        self.stacks = crate::stacks::load_all();
     }
 
     pub fn set_status(&mut self, msg: impl Into<String>) {
