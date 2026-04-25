@@ -232,6 +232,41 @@ fn push(sink: &Arc<Mutex<Vec<String>>>, line: String) {
     }
 }
 
+/// Path of the stack file `<dir>/<name>.toml`. Returns None if no config dir.
+pub fn path_for(name: &str) -> Option<PathBuf> {
+    stacks_dir().map(|d| d.join(format!("{name}.toml")))
+}
+
+/// Create a new stack file with a starter template. Returns the path on
+/// success; errors if the file already exists or no config dir is available.
+pub fn create_template(name: &str) -> Result<PathBuf> {
+    let Some(dir) = stacks_dir() else {
+        return Err(anyhow!("no XDG_CONFIG_HOME or HOME — can't write stack"));
+    };
+    std::fs::create_dir_all(&dir).context("create stacks dir")?;
+    let p = dir.join(format!("{name}.toml"));
+    if p.exists() {
+        return Err(anyhow!("stack '{name}' already exists at {}", p.display()));
+    }
+    let body = format!(
+        r#"# cgui stack — bring up with `u`, tear down with `D`.
+name = "{name}"
+
+[[service]]
+name = "app"
+image = "docker.io/library/alpine:latest"
+# env = {{ KEY = "value" }}
+# ports = ["8080:80"]
+# volumes = ["mydata:/data"]
+# network = "default"
+# depends_on = []
+# args = ["sh", "-c", "while true; do date; sleep 5; done"]
+"#
+    );
+    std::fs::write(&p, body).context("write stack template")?;
+    Ok(p)
+}
+
 /// Best-effort: write a sample stack file the first time the user opens the
 /// Stacks tab and it's empty, so they have something to play with.
 pub fn ensure_sample() -> Result<Option<PathBuf>> {

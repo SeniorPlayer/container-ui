@@ -78,6 +78,7 @@ cgui tui        # same
 | `↑` / `↓`      | (in Pull/Build prompts) cycle through **recent presets** |
 | `T`            | (Images) **Trivy scan** of selected image (HIGH+CRITICAL) |
 | `u` / `D`      | (Stacks) **Up** / **Down** the selected stack       |
+| `n` / `E`      | (Stacks) **New** stack (template + `$EDITOR`) · **Edit** selected stack |
 
 On the Logs tab `/` enters **search-as-you-type**: matches highlight in yellow as you type, with a live match counter in the title (`Logs · foo · search:err  (4 matches)`). Enter exits the input but keeps the highlight; `Esc` clears.
 
@@ -197,7 +198,30 @@ Exit code 0 if everything's green, 1 otherwise. Useful for CI or scripting.
 
 ### Trivy image scan
 
-If [trivy](https://github.com/aquasecurity/trivy) is on `$PATH`, press `T` on an Images row (or right-click → Trivy scan). Runs `trivy image --quiet --severity HIGH,CRITICAL <ref>` and streams the report into the same modal as pull/build. `Esc` backgrounds it; `P` re-attaches.
+If [trivy](https://github.com/aquasecurity/trivy) is on `$PATH`, press `T` on an Images row (or right-click → Trivy scan). Runs `trivy image --format json --severity HIGH,CRITICAL <ref>`, streams stderr progress into the standard op modal, then on completion **switches to a parsed results modal** with:
+
+- Severity-colored count chips at the top (`CRITICAL 3 · HIGH 12 · …`)
+- A scrollable table of findings (sev / CVE / package / installed / fixed / title), sorted critical-first
+- ↑↓/PgUp/PgDn to scroll, Esc to close
+
+If parsing fails (older trivy schema or malformed output) the raw stream stays visible — no data is lost.
+
+### Importing docker-compose.yml
+
+```bash
+$ cgui import-compose ./docker-compose.yml --name myapp
+$ cgui import-compose ./docker-compose.yml --name myapp --write   # writes to ~/.config/cgui/stacks/myapp.toml
+```
+
+Translates a useful subset of compose v2/v3 (`image`, `environment` map+list, `ports`, `volumes`, `depends_on` list+map, `networks`, `command` string+list) into a cgui stack TOML body. Unknown keys are silently dropped — this is a pragmatic translator, not a full compose engine. Without `--write` the result goes to stdout so you can pipe or eyeball it.
+
+### Editing stacks in-TUI
+
+On the Stacks tab:
+- `n` → name prompt → writes a template file → opens in `$EDITOR` (defaults to `vi`)
+- `E` → opens the highlighted stack's source file in `$EDITOR`
+
+The TUI is fully suspended while the editor runs (alt-screen left, raw mode off) and rebuilt cleanly on exit. The stack list reloads from disk afterwards so your edits show up immediately.
 
 In the Detail pane: `↑↓`/`PgUp`/`PgDn` scroll, `Esc` closes.
 In the Pull modal: `Esc` hides; pull keeps running in the background and the status bar reports completion.
@@ -272,11 +296,14 @@ State refresh is async and best-effort: if one source (e.g. `volume ls`) fails, 
 | Network detail pane (mode/state/subnets/nameservers)  | ✅ shipped | 0.9.0          |
 | Trivy image scan (`T` on Images tab)                  | ✅ shipped | 0.9.0          |
 | **Stacks** tab — compose-style multi-service sessions | ✅ shipped | 0.9.0          |
+| Stack create/edit in TUI (`n`/`E` → `$EDITOR`)        | ✅ shipped | 0.10.0         |
+| Parsed Trivy results modal (severity-grouped table)   | ✅ shipped | 0.10.0         |
+| `cgui import-compose` (docker-compose.yml → stack)    | ✅ shipped | 0.10.0         |
 | Optional GUI front end (Tauri)                        | 🟡 planned | —              |
 
 ## Roadmap
 
 - Optional GUI front end (Tauri) sharing the same `container.rs` core
-- Stack edit/create from the TUI (currently file-based only)
-- Trivy results parser → severity-grouped table view (currently raw text)
-- Compose-format import (translate docker-compose.yml → cgui stack TOML)
+- Stack restart-policy + healthcheck support
+- Trivy results: filter by severity / search by CVE
+- Live re-parse of stack files on disk (inotify/FSEvents)

@@ -4,6 +4,7 @@ use crate::app::{App, Mode, Tab};
 use crate::jsonhl;
 use crate::pullprog;
 use crate::theme::AlertLevel;
+use crate::trivy::Severity;
 use humansize::{format_size, BINARY};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -50,6 +51,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::ContextMenu => draw_context_menu(f, app, area),
         Mode::FilePicker => draw_file_picker(f, app, area),
         Mode::ProfilePicker => draw_profile_picker(f, app, area),
+        Mode::PromptStackName => draw_stack_name_prompt(f, app, area),
+        Mode::TrivyResult => draw_trivy_result(f, app, area),
         Mode::Browse | Mode::Filter | Mode::LogSearch => {}
     }
 }
@@ -984,6 +987,8 @@ fn draw_help_overlay(f: &mut Frame, app: &App, area: Rect) {
             lines.push(h("D", "Down — stop+delete every service container"));
             lines.push(h("Enter", "Detail: source path + service list (inspect)"));
             lines.push(h("l", "Logs of the stack's first service"));
+            lines.push(h("n", "New stack (template + open in $EDITOR)"));
+            lines.push(h("E", "Edit selected stack in $EDITOR"));
         }
         Tab::Logs => {
             lines.push(section("Logs"));
@@ -1192,6 +1197,138 @@ fn truncate(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
     out.push('…');
     out
+}
+
+fn draw_stack_name_prompt(f: &mut Frame, app: &App, area: Rect) {
+    let r = centered(area, 60, 20);
+    f.render_widget(Clear, r);
+    let body = Paragraph::new(vec![
+        Line::from(Span::styled(
+            "New stack name (TOML filename, no extension):",
+            Style::default().fg(app.theme.primary),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(&app.prompt_buf, Style::default().fg(app.theme.warning)),
+            Span::styled("█", Style::default().fg(app.theme.warning)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Enter create + open in $EDITOR · Esc cancel",
+            Style::default().fg(app.theme.muted),
+        )),
+    ])
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(app.theme.accent))
+            .title(" New stack "),
+    );
+    f.render_widget(body, r);
+}
+
+fn draw_trivy_result(f: &mut Frame, app: &App, area: Rect) {
+    let r = centered(area, 90, 80);
+    f.render_widget(Clear, r);
+    let Some(report) = &app.trivy_report else {
+        let p = Paragraph::new("No trivy report parsed.").block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(app.theme.muted))
+                .title(" Trivy "),
+        );
+        f.render_widget(p, r);
+        return;
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(app.theme.accent))
+        .title(Span::styled(
+            format!(" Trivy · {} · ↑↓ scroll · Esc close ", report.artifact),
+            Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+
+    let split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .split(inner);
+
+    // Severity counts row.
+    let counts = report.counts();
+    let mut count_spans: Vec<Span> = Vec::with_capacity(counts.len() * 2);
+    for (sev, n) in counts {
+        if n == 0 && sev != Severity::Critical && sev != Severity::High {
+            continue;
+        }
+        let (fg, bg) = severity_colors(app, sev);
+        let chip = format!(" {} {n} ", sev.label());
+        count_spans.push(Span::styled(
+            chip,
+            Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+        ));
+        count_spans.push(Span::raw(" "));
+    }
+    let header = Paragraph::new(Line::from(count_spans)).block(
+        Block::default()
+            .borders(Borders::BOTTOM)
+            .border_style(Style::default().fg(app.theme.muted)),
+    );
+    f.render_widget(header, split[0]);
+
+    // Findings table.
+    if report.findings.is_empty() {
+        let body = Paragraph::new(Line::from(Span::styled(
+            "no HIGH or CRITICAL findings ✓",
+            Style::default().fg(app.theme.success).add_modifier(Modifier::BOLD),
+        )));
+        f.render_widget(body, split[1]);
+        return;
+    }
+    let header_row = Row::new(vec!["SEV", "CVE", "PKG", "INSTALLED", "FIXED", "TITLE"])
+        .style(header_style());
+    let rows: Vec<Row> = report
+        .findings
+        .iter()
+        .map(|fnd| {
+            let (fg, _) = severity_colors(app, fnd.severity);
+            let sev_cell = Cell::from(fnd.severity.label())
+                .style(Style::default().fg(fg).add_modifier(Modifier::BOLD));
+            let fixed = if fnd.fixed.is_empty() { "—".into() } else { fnd.fixed.clone() };
+            Row::new(vec![
+                sev_cell,
+                Cell::from(fnd.id.clone()),
+                Cell::from(fnd.pkg.clone()).style(Style::default().fg(app.theme.info)),
+                Cell::from(fnd.installed.clone()).style(Style::default().fg(app.theme.muted)),
+                Cell::from(fixed).style(Style::default().fg(app.theme.success)),
+                Cell::from(fnd.title.clone()),
+            ])
+        })
+        .skip(app.trivy_scroll as usize)
+        .collect();
+    let widths = [
+        Constraint::Length(9),
+        Constraint::Length(18),
+        Constraint::Length(18),
+        Constraint::Length(14),
+        Constraint::Length(14),
+        Constraint::Min(10),
+    ];
+    let table = Table::new(rows, widths).header(header_row);
+    f.render_widget(table, split[1]);
+}
+
+fn severity_colors(app: &App, s: Severity) -> (Color, Color) {
+    match s {
+        Severity::Critical => (Color::White, app.theme.danger),
+        Severity::High => (Color::Black, app.theme.warning),
+        Severity::Medium => (Color::Black, app.theme.info),
+        Severity::Low => (Color::Black, app.theme.muted),
+        Severity::Unknown => (Color::White, Color::DarkGray),
+    }
 }
 
 fn short_digest(d: &str) -> String {

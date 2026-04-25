@@ -1,5 +1,6 @@
 mod app;
 mod cli;
+mod compose;
 mod container;
 mod doctor;
 mod jsonhl;
@@ -8,6 +9,7 @@ mod pullprog;
 mod runtime;
 mod stacks;
 mod theme;
+mod trivy;
 mod ui;
 
 use anyhow::Result;
@@ -92,6 +94,22 @@ async fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>) -> Res
                 match res {
                     Ok(()) => app.set_status(format!("{verb} complete.")),
                     Err(e) => app.set_status(format!("{verb} failed: {e}")),
+                }
+                // Trivy: parse the captured JSON body and switch to the
+                // result modal automatically. Falls back to leaving the raw
+                // op log visible if parsing fails.
+                if app.op_kind == OperationKind::Trivy {
+                    let json = app.trivy_json.lock().ok().map(|g| g.clone()).unwrap_or_default();
+                    if !json.trim().is_empty() {
+                        if let Some(report) = trivy::Report::parse(&json) {
+                            app.trivy_report = Some(report);
+                            app.trivy_scroll = 0;
+                            app.mode = Mode::TrivyResult;
+                        }
+                    }
+                }
+                if matches!(app.op_kind, OperationKind::StackUp | OperationKind::StackDown) {
+                    app.reload_stacks();
                 }
                 app.refresh().await.ok();
             }
@@ -473,6 +491,67 @@ async fn handle_key<B: ratatui::backend::Backend>(
             }
             return Ok(());
         }
+        Mode::PromptStackName => {
+            match code {
+                KeyCode::Esc => {
+                    app.prompt_buf.clear();
+                    app.mode = Mode::Browse;
+                    app.reset_status();
+                }
+                KeyCode::Enter => {
+                    let name = app.prompt_buf.trim().to_string();
+                    if name.is_empty() {
+                        app.set_status("create cancelled (empty name)");
+                        app.mode = Mode::Browse;
+                        return Ok(());
+                    }
+                    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                        app.set_status("name must be ASCII alphanumeric, '-', or '_'");
+                        return Ok(());
+                    }
+                    match stacks::create_template(&name) {
+                        Ok(p) => {
+                            app.mode = Mode::Browse;
+                            app.set_status(format!("created {} — opening $EDITOR…", p.display()));
+                            edit_path(term, app, p).await?;
+                            app.reload_stacks();
+                        }
+                        Err(e) => {
+                            app.set_status(format!("create failed: {e}"));
+                        }
+                    }
+                }
+                KeyCode::Backspace => {
+                    app.prompt_buf.pop();
+                }
+                KeyCode::Char(c) => {
+                    app.prompt_buf.push(c);
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+        Mode::TrivyResult => {
+            match code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+                    app.mode = Mode::Browse;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    app.trivy_scroll = app.trivy_scroll.saturating_add(1);
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    app.trivy_scroll = app.trivy_scroll.saturating_sub(1);
+                }
+                KeyCode::PageDown => {
+                    app.trivy_scroll = app.trivy_scroll.saturating_add(10);
+                }
+                KeyCode::PageUp => {
+                    app.trivy_scroll = app.trivy_scroll.saturating_sub(10);
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
         Mode::ContextMenu => {
             let len = app.context_menu.as_ref().map(|m| m.items.len()).unwrap_or(0);
             match code {
@@ -784,6 +863,12 @@ async fn handle_key<B: ratatui::backend::Backend>(
         KeyCode::Char('u') if app.tab == Tab::Stacks => start_stack(app, pull_handle, true).await,
         KeyCode::Char('D') if app.tab == Tab::Stacks => start_stack(app, pull_handle, false).await,
         KeyCode::Char('l') if app.tab == Tab::Stacks => stack_logs(app, log_handle).await,
+        KeyCode::Char('n') if app.tab == Tab::Stacks => {
+            app.prompt_buf.clear();
+            app.mode = Mode::PromptStackName;
+            app.set_status("Type a stack name (no extension), Enter to create");
+        }
+        KeyCode::Char('E') if app.tab == Tab::Stacks => edit_stack(term, app).await?,
         KeyCode::Char(' ') if app.tab == Tab::Containers => {
             app.toggle_mark_current_container();
             app.move_down();
@@ -957,6 +1042,47 @@ async fn open_detail(app: &mut App) {
     }
 }
 
+async fn edit_stack<B: ratatui::backend::Backend>(
+    term: &mut Terminal<B>,
+    app: &mut App,
+) -> Result<()> {
+    let Some(stack) = app.current_stack() else {
+        app.set_status("No stack selected.");
+        return Ok(());
+    };
+    let Some(path) = stack.source.clone() else {
+        app.set_status("Stack has no source path on disk.");
+        return Ok(());
+    };
+    edit_path(term, app, path).await?;
+    app.reload_stacks();
+    Ok(())
+}
+
+async fn edit_path<B: ratatui::backend::Backend>(
+    term: &mut Terminal<B>,
+    app: &mut App,
+    path: std::path::PathBuf,
+) -> Result<()> {
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
+    leave_terminal()?;
+    println!("\n--- cgui edit → {editor} {} ---\n", path.display());
+    // Pass the editor command verbatim through `sh -c` so values like
+    // "code -w" or "nvim +12" work.
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"{}\"", path.display()))
+        .status();
+    enter_terminal()?;
+    term.clear()?;
+    match status {
+        Ok(s) if s.success() => app.set_status(format!("edited {}", path.display())),
+        Ok(s) => app.set_status(format!("editor exited {s}")),
+        Err(e) => app.set_status(format!("editor spawn error: {e}")),
+    }
+    Ok(())
+}
+
 fn stack_detail_text(app: &App) -> String {
     let Some(s) = app.current_stack() else { return "(no stack)".into() };
     let mut out = String::new();
@@ -1007,11 +1133,17 @@ async fn start_trivy(
         return;
     };
     if let Ok(mut v) = app.pull_log.lock() { v.clear(); }
+    if let Ok(mut s) = app.trivy_json.lock() { s.clear(); }
+    app.trivy_report = None;
     app.pull_running = true;
     app.op_kind = OperationKind::Trivy;
     app.pull_reference = Some(image.clone());
     app.op_scroll = 0;
-    *pull_handle = Some(container::spawn_trivy(image.clone(), app.pull_log.clone()));
+    *pull_handle = Some(container::spawn_trivy(
+        image.clone(),
+        app.pull_log.clone(),
+        app.trivy_json.clone(),
+    ));
     app.mode = Mode::PullProgress;
     app.set_status(format!("scanning {image}…"));
 }

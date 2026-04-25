@@ -59,6 +59,9 @@ pub fn dispatch_cli(cli: &Cli) -> Result<Option<i32>> {
     if verb == "doctor" {
         return Ok(Some(crate::doctor::run()));
     }
+    if verb == "import-compose" {
+        return Ok(Some(import_compose(&cli.args[1..])));
+    }
     let mapped = translate(verb);
     let rest = &cli.args[1..];
 
@@ -82,4 +85,79 @@ pub fn dispatch_cli(cli: &Cli) -> Result<Option<i32>> {
         .stderr(Stdio::inherit())
         .status()?;
     Ok(Some(status.code().unwrap_or(1)))
+}
+
+/// `cgui import-compose <docker-compose.yml> [--name <stack>] [--write]`
+///
+/// Reads the compose file, translates it to a cgui stack TOML body, and
+/// either prints it to stdout (default) or writes it to
+/// `~/.config/cgui/stacks/<stack>.toml` (`--write`).
+fn import_compose(args: &[String]) -> i32 {
+    if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
+        eprintln!(
+            "usage: cgui import-compose <docker-compose.yml> [--name <stack>] [--write]"
+        );
+        return 2;
+    }
+    let path = std::path::PathBuf::from(&args[0]);
+    let mut name: Option<String> = None;
+    let mut write = false;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--name" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("--name needs a value");
+                    return 2;
+                }
+                name = Some(args[i].clone());
+            }
+            "--write" => write = true,
+            other => {
+                eprintln!("unknown flag: {other}");
+                return 2;
+            }
+        }
+        i += 1;
+    }
+    let stack_name = name.unwrap_or_else(|| {
+        path.file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "imported".into())
+    });
+    let toml = match crate::compose::import(&path, &stack_name) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("import failed: {e}");
+            return 1;
+        }
+    };
+    if !write {
+        print!("{toml}");
+        return 0;
+    }
+    let Some(target) = crate::stacks::path_for(&stack_name) else {
+        eprintln!("no $XDG_CONFIG_HOME or $HOME — cannot --write");
+        return 1;
+    };
+    if target.exists() {
+        eprintln!(
+            "{} already exists. Re-run with `--name <other>` or remove first.",
+            target.display()
+        );
+        return 1;
+    }
+    if let Some(parent) = target.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("mkdir {}: {}", parent.display(), e);
+            return 1;
+        }
+    }
+    if let Err(e) = std::fs::write(&target, toml) {
+        eprintln!("write {}: {}", target.display(), e);
+        return 1;
+    }
+    println!("wrote {}", target.display());
+    0
 }

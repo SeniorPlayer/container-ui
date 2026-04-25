@@ -487,16 +487,24 @@ pub async fn network_detail(id: &str) -> Result<String> {
     Ok(format!("{header}{pretty}"))
 }
 
-/// Streaming trivy image scan. Mirrors `spawn_pull` so the modal infra is
-/// shared. Requires `trivy` on PATH; the spawn fails cleanly if not.
+/// Streaming trivy image scan. Captures the JSON report into `json_sink`
+/// (one entry containing the full body) while echoing progress lines from
+/// stderr into the visible op `sink`. The caller parses `json_sink` after
+/// the task completes.
+///
+/// Requires `trivy` on PATH; the spawn fails cleanly if not.
 pub fn spawn_trivy(
     image: String,
     sink: Arc<Mutex<Vec<String>>>,
+    json_sink: Arc<Mutex<String>>,
 ) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move {
-        push(&sink, format!("$ trivy image --quiet --severity HIGH,CRITICAL {image}"));
+        push(
+            &sink,
+            format!("$ trivy image --format json --severity HIGH,CRITICAL {image}"),
+        );
         let mut child = match Command::new("trivy")
-            .args(["image", "--quiet", "--severity", "HIGH,CRITICAL", &image])
+            .args(["image", "--format", "json", "--severity", "HIGH,CRITICAL", &image])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -510,21 +518,26 @@ pub fn spawn_trivy(
         };
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
-        let s1 = sink.clone();
-        let s2 = sink.clone();
+        let s_err = sink.clone();
+        let json_sink_inner = json_sink.clone();
+
+        // stdout is the JSON body — read it to a single String.
         let t_out = tokio::spawn(async move {
-            if let Some(out) = stdout {
-                let mut lines = BufReader::new(out).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    push(&s1, line);
+            if let Some(mut out) = stdout {
+                use tokio::io::AsyncReadExt;
+                let mut buf = Vec::new();
+                let _ = out.read_to_end(&mut buf).await;
+                if let Ok(mut g) = json_sink_inner.lock() {
+                    *g = String::from_utf8_lossy(&buf).into_owned();
                 }
             }
         });
+        // stderr is human-readable progress — line-buffer it into the op log.
         let t_err = tokio::spawn(async move {
             if let Some(err) = stderr {
                 let mut lines = BufReader::new(err).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    push(&s2, line);
+                    push(&s_err, line);
                 }
             }
         });

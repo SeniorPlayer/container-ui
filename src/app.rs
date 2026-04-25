@@ -78,6 +78,10 @@ pub enum Mode {
     FilePicker,
     /// Pick a runtime profile (which container CLI to shell out to).
     ProfilePicker,
+    /// Single-field prompt for a new stack name.
+    PromptStackName,
+    /// Parsed Trivy scan results modal.
+    TrivyResult,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -272,6 +276,12 @@ pub struct App {
 
     /// Loaded compose-style stacks from `~/.config/cgui/stacks/*.toml`.
     pub stacks: Vec<crate::stacks::Stack>,
+
+    /// Latest parsed Trivy report, if a scan finished successfully.
+    pub trivy_report: Option<crate::trivy::Report>,
+    pub trivy_scroll: u16,
+    /// Captured trivy JSON body (filled by spawn_trivy on completion).
+    pub trivy_json: Arc<Mutex<String>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -375,6 +385,9 @@ impl App {
                 let _ = crate::stacks::ensure_sample();
                 crate::stacks::load_all()
             },
+            trivy_report: None,
+            trivy_scroll: 0,
+            trivy_json: Arc::new(Mutex::new(String::new())),
         }
     }
 
