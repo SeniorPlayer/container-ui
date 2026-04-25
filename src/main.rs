@@ -2,13 +2,17 @@ mod app;
 mod cli;
 mod container;
 mod jsonhl;
+mod prefs;
 mod pullprog;
 mod ui;
 
 use anyhow::Result;
 use clap::Parser;
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyModifiers},
+    event::{
+        DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyModifiers,
+        MouseButton, MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -89,14 +93,74 @@ async fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>) -> Res
             }
             _ = redraw.tick() => { /* re-render only */ }
             ev = events.next() => {
-                if let Some(Ok(Event::Key(k))) = ev {
-                    if k.kind != crossterm::event::KeyEventKind::Press { continue; }
-                    handle_key(term, &mut app, &mut pull_handle, k.code, k.modifiers).await?;
+                match ev {
+                    Some(Ok(Event::Key(k))) => {
+                        if k.kind != crossterm::event::KeyEventKind::Press { continue; }
+                        handle_key(term, &mut app, &mut pull_handle, k.code, k.modifiers).await?;
+                    }
+                    Some(Ok(Event::Mouse(m))) => handle_mouse(&mut app, m).await,
+                    _ => {}
                 }
             }
         }
     }
+    app.save_prefs();
     Ok(())
+}
+
+async fn handle_mouse(app: &mut App, m: MouseEvent) {
+    if !matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
+        return;
+    }
+    // Block clicks while overlays are up (other than the help overlay, which
+    // also closes on click anywhere).
+    match app.mode {
+        app::Mode::Help => {
+            app.mode = app::Mode::Browse;
+            return;
+        }
+        app::Mode::Detail | app::Mode::PromptPull | app::Mode::PullProgress => return,
+        _ => {}
+    }
+
+    if let Some(tabs) = app.layout.tabs {
+        if hit(tabs, m.column, m.row) {
+            if let Some(t) = tab_from_x(tabs, m.column) {
+                app.set_tab(t);
+            }
+            return;
+        }
+    }
+    if let Some(body) = app.layout.body {
+        if hit(body, m.column, m.row) {
+            let row = (m.row.saturating_sub(body.y)) as usize;
+            let n = app.row_count();
+            if n > 0 && row < n {
+                app.selected = row;
+            }
+        }
+    }
+}
+
+fn hit(r: ratatui::layout::Rect, x: u16, y: u16) -> bool {
+    x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
+}
+
+/// Map an x coordinate inside the tab bar to a Tab. ratatui's `Tabs` widget
+/// renders titles separated by " │ " (length 3) inside a 1-col bordered box,
+/// each title padded by 1 space on each side. We replicate that math here.
+fn tab_from_x(tabs_rect: ratatui::layout::Rect, x: u16) -> Option<app::Tab> {
+    let inside = x.checked_sub(tabs_rect.x.saturating_add(1))?; // skip border
+    // Each rendered tab takes: " label "  (len + 2). Separator " │ " (3).
+    let mut cursor: u16 = 0;
+    for (i, t) in app::Tab::ALL.iter().enumerate() {
+        let label_len = t.label().chars().count() as u16 + 2;
+        if inside >= cursor && inside < cursor + label_len {
+            return Some(app::Tab::ALL[i]);
+        }
+        cursor = cursor + label_len + 3;
+    }
+    None
 }
 
 async fn handle_key<B: ratatui::backend::Backend>(
@@ -196,6 +260,12 @@ async fn handle_key<B: ratatui::backend::Backend>(
             }
             return Ok(());
         }
+        Mode::Help => {
+            if matches!(code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') | KeyCode::Enter) {
+                app.mode = Mode::Browse;
+            }
+            return Ok(());
+        }
         Mode::LogSearch => {
             match code {
                 KeyCode::Esc => {
@@ -255,7 +325,11 @@ async fn handle_key<B: ratatui::backend::Backend>(
             } else {
                 "Showing running only"
             });
+            app.save_prefs();
             app.refresh().await.ok();
+        }
+        KeyCode::Char('?') => {
+            app.mode = Mode::Help;
         }
         KeyCode::Char('/') => {
             if app.tab == Tab::Logs {
@@ -277,6 +351,9 @@ async fn handle_key<B: ratatui::backend::Backend>(
         KeyCode::Char('o') => {
             app.sort_key = app.sort_key.cycle(app.tab);
             app.selected = 0;
+            app.sort_keys
+                .insert(app.tab.key().to_string(), app.sort_key.0);
+            app.save_prefs();
             app.set_status(format!("sort: {}", app.sort_key.label(app.tab)));
         }
         KeyCode::Enter => open_detail(app).await,
@@ -381,7 +458,11 @@ async fn open_detail(app: &mut App) {
         return;
     };
     app.set_status(format!("inspecting {id}…"));
-    match container::inspect(&id).await {
+    let result = match app.tab {
+        Tab::Volumes => container::volume_detail(&id).await,
+        _ => container::inspect(&id).await,
+    };
+    match result {
         Ok(s) => {
             app.detail = s;
             app.detail_scroll = 0;

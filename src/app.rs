@@ -1,7 +1,9 @@
 //! TUI state machine. Pure data + transitions; rendering lives in `ui`.
 
 use crate::container::{self, Container, Image, Network, StatRow, Volume};
+use crate::prefs::Prefs;
 use anyhow::Result;
+use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -32,6 +34,19 @@ impl Tab {
             Tab::Logs => "Logs",
         }
     }
+    pub fn key(self) -> &'static str {
+        // Stable, lowercase token for serialization.
+        match self {
+            Tab::Containers => "containers",
+            Tab::Images => "images",
+            Tab::Volumes => "volumes",
+            Tab::Networks => "networks",
+            Tab::Logs => "logs",
+        }
+    }
+    pub fn from_key(s: &str) -> Option<Tab> {
+        Self::ALL.iter().copied().find(|t| t.key() == s)
+    }
 }
 
 /// Top-level interaction mode. Controls how keystrokes are dispatched and
@@ -46,6 +61,8 @@ pub enum Mode {
     /// Search-as-you-type within the Logs tab. Highlights matching substrings
     /// in place; Enter exits but keeps the highlight; Esc clears.
     LogSearch,
+    /// Help overlay listing keybindings for the current tab.
+    Help,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -113,14 +130,44 @@ pub struct App {
     /// What we're currently pulling, if anything (used to label the gauge and
     /// the backgrounded-pull indicator in the status bar).
     pub pull_reference: Option<String>,
+
+    /// Persisted per-tab sort key — kept here in sync with `sort_key` for the
+    /// active tab so we don't lose sort choice when switching away and back.
+    pub sort_keys: HashMap<String, u8>,
+
+    /// Cached layout rects from the most recent draw, used for mouse hit
+    /// testing. None until first draw.
+    pub layout: LayoutCache,
+
+    /// Loaded-from-disk and saved-back preferences.
+    pub prefs: Prefs,
+}
+
+#[derive(Default, Clone, Debug)]
+pub struct LayoutCache {
+    pub tabs: Option<Rect>,
+    pub body: Option<Rect>,
 }
 
 impl App {
     pub fn new() -> Self {
+        let prefs = Prefs::load();
+        let tab = prefs
+            .tab
+            .as_deref()
+            .and_then(Tab::from_key)
+            .unwrap_or(Tab::Containers);
+        let show_all = prefs.show_all.unwrap_or(true);
+        let sort_keys: HashMap<String, u8> = prefs.sort.clone();
+        let sort_key = SortKey(sort_keys.get(tab.key()).copied().unwrap_or(0));
         Self {
+            tab,
+            show_all,
+            sort_key,
+            sort_keys,
+            prefs,
+            layout: LayoutCache::default(),
             running: true,
-            tab: Tab::Containers,
-            show_all: true,
             containers: vec![],
             images: vec![],
             volumes: vec![],
@@ -137,7 +184,6 @@ impl App {
             mode: Mode::Browse,
             filter: String::new(),
             prompt_buf: String::new(),
-            sort_key: SortKey(0),
             detail: String::new(),
             detail_scroll: 0,
             pull_log: Arc::new(Mutex::new(Vec::new())),
@@ -146,6 +192,14 @@ impl App {
             log_search: String::new(),
             pull_reference: None,
         }
+    }
+
+    /// Persist current preferences. Cheap; safe to call after any change.
+    pub fn save_prefs(&mut self) {
+        self.prefs.tab = Some(self.tab.key().to_string());
+        self.prefs.show_all = Some(self.show_all);
+        self.prefs.sort = self.sort_keys.clone();
+        self.prefs.save();
     }
 
     /// Whether a pull's modal is worth re-opening: either it's running, or it
@@ -196,15 +250,22 @@ impl App {
 
     pub fn next_tab(&mut self) {
         let i = Tab::ALL.iter().position(|t| *t == self.tab).unwrap_or(0);
-        self.tab = Tab::ALL[(i + 1) % Tab::ALL.len()];
-        self.selected = 0;
-        self.sort_key = SortKey(0);
+        self.set_tab(Tab::ALL[(i + 1) % Tab::ALL.len()]);
     }
     pub fn prev_tab(&mut self) {
         let i = Tab::ALL.iter().position(|t| *t == self.tab).unwrap_or(0);
-        self.tab = Tab::ALL[(i + Tab::ALL.len() - 1) % Tab::ALL.len()];
+        self.set_tab(Tab::ALL[(i + Tab::ALL.len() - 1) % Tab::ALL.len()]);
+    }
+    pub fn set_tab(&mut self, t: Tab) {
+        if self.tab == t {
+            return;
+        }
+        // Stash sort key for outgoing tab; restore for incoming.
+        self.sort_keys.insert(self.tab.key().to_string(), self.sort_key.0);
+        self.tab = t;
+        self.sort_key = SortKey(self.sort_keys.get(t.key()).copied().unwrap_or(0));
         self.selected = 0;
-        self.sort_key = SortKey(0);
+        self.save_prefs();
     }
 
     /// Indices into the underlying tab data after filter+sort. The Logs tab

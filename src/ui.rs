@@ -28,6 +28,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         ])
         .split(area);
 
+    // Cache regions for mouse hit testing. Body region excludes the block
+    // border so click-row math lines up with the rendered rows below.
+    app.layout.tabs = Some(outer[0]);
+    app.layout.body = Some(inner_body(outer[2]));
+
     draw_tabs(f, app, outer[0]);
     draw_sparklines(f, app, outer[1]);
     draw_body(f, app, outer[2]);
@@ -39,7 +44,19 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::Detail => draw_detail_overlay(f, app, area),
         Mode::PromptPull => draw_prompt_overlay(f, app, area),
         Mode::PullProgress => draw_pull_overlay(f, app, area),
+        Mode::Help => draw_help_overlay(f, app, area),
         Mode::Browse | Mode::Filter | Mode::LogSearch => {}
+    }
+}
+
+/// Body Rect minus the block border (1 row top/bottom, 1 col left/right) and
+/// the table header row (1).
+fn inner_body(r: Rect) -> Rect {
+    Rect {
+        x: r.x.saturating_add(1),
+        y: r.y.saturating_add(1).saturating_add(1),
+        width: r.width.saturating_sub(2),
+        height: r.height.saturating_sub(3),
     }
 }
 
@@ -570,6 +587,92 @@ fn draw_prompt_overlay(f: &mut Frame, app: &App, area: Rect) {
             .title(" Pull image "),
     );
     f.render_widget(body, r);
+}
+
+fn draw_help_overlay(f: &mut Frame, app: &App, area: Rect) {
+    let r = centered(area, 70, 80);
+    f.render_widget(Clear, r);
+
+    let mut lines: Vec<Line> = Vec::new();
+    let h = |k: &str, d: &str| -> Line<'static> {
+        Line::from(vec![
+            Span::styled(
+                format!("  {k:<14}"),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(d.to_string()),
+        ])
+    };
+    let section = |title: &str| -> Line<'static> {
+        Line::from(Span::styled(
+            format!(" {title} "),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
+    };
+
+    lines.push(section("Global"));
+    lines.push(h("q / Esc", "Quit (or clear filter/search if set)"));
+    lines.push(h("Tab / →", "Next tab"));
+    lines.push(h("Shift-Tab / ←", "Prev tab"));
+    lines.push(h("↑ ↓ / j", "Move selection"));
+    lines.push(h("Enter", "Inspect (open detail pane)"));
+    lines.push(h("/", "Filter (Logs: search-as-you-type)"));
+    lines.push(h("o", "Cycle sort key for current tab"));
+    lines.push(h("r", "Refresh"));
+    lines.push(h("a", "Toggle show-all vs running-only"));
+    lines.push(h("?", "Toggle this help"));
+    lines.push(h("Mouse", "Click tab title or row to select"));
+    lines.push(Line::from(""));
+
+    match app.tab {
+        Tab::Containers => {
+            lines.push(section("Containers"));
+            lines.push(h("Space", "Mark / unmark for batch ops"));
+            lines.push(h("s / x / K / d", "Start / stop / kill / delete"));
+            lines.push(h("l", "Load logs into Logs tab"));
+            lines.push(h("e", "Exec /bin/sh in selected container"));
+        }
+        Tab::Images => {
+            lines.push(section("Images"));
+            lines.push(h("p", "Pull image (prompt + progress modal)"));
+            lines.push(h("P", "Re-attach to backgrounded pull"));
+        }
+        Tab::Volumes => {
+            lines.push(section("Volumes"));
+            lines.push(h("Enter", "Detail: capacity, on-disk, fill bar, JSON"));
+        }
+        Tab::Networks => {
+            lines.push(section("Networks"));
+            lines.push(h("Enter", "Inspect network JSON"));
+        }
+        Tab::Logs => {
+            lines.push(section("Logs"));
+            lines.push(h("/", "Search-as-you-type (highlight matches)"));
+            lines.push(h("Esc", "Clear search"));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(section("Pull modal"));
+    lines.push(h("Esc", "Background the modal (status bar chip + P to re-attach)"));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Press ? or Esc to close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let p = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(Span::styled(
+                format!(" cgui · help · {} ", app.tab.label()),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )),
+    );
+    f.render_widget(p, r);
 }
 
 fn draw_pull_overlay(f: &mut Frame, app: &App, area: Rect) {

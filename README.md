@@ -66,12 +66,18 @@ cgui tui        # same
 | `e`            | **Exec** — drop into `/bin/sh` in selected container (Ctrl-D returns to TUI) |
 | `p`            | **Pull** an image (Images tab) — opens prompt + live progress modal |
 | `P`            | **Re-attach** to a backgrounded pull (running or recently-finished) |
+| `?`            | Toggle the **per-tab help** overlay                |
+| **Mouse**      | Click a tab title to switch tabs · click a row to select it |
 
 On the Logs tab `/` enters **search-as-you-type**: matches highlight in yellow as you type, with a live match counter in the title (`Logs · foo · search:err  (4 matches)`). Enter exits the input but keeps the highlight; `Esc` clears.
 
 The pull modal renders a colored **Gauge** driven by a permissive parser of the streamed output (recognises `42%`, `12.3MB/45.6MB`, and `3/8` layer ratios — newest match wins). `Esc` backgrounds the modal: a yellow `⟳ pulling ref 42% — P to view` chip appears in the status bar so you can re-open it any time. When the pull finishes the chip turns green; pressing `P` shows the final log.
 
 The Containers table shows **live CPU% and MEM** (used / limit) per row when a stats sample is available, with traffic-light coloring. Marked rows display a yellow `●` in the leftmost column.
+
+On the **Volumes tab**, `Enter` opens a richer detail pane: capacity from the CLI, actual on-disk size from the backing image (sparse images are honest about it), a unicode fill bar (`[████░░░░░░] 42.3%`), and the full inspect JSON below.
+
+User preferences (last tab, per-tab sort key, show-all toggle) are persisted to `$XDG_CONFIG_HOME/cgui/state.json` (defaults to `~/.config/cgui/state.json`). Saved on every relevant change and on quit; missing or malformed files are silently ignored.
 
 In the Detail pane: `↑↓`/`PgUp`/`PgDn` scroll, `Esc` closes.
 In the Pull modal: `Esc` hides; pull keeps running in the background and the status bar reports completion.
@@ -127,12 +133,16 @@ State refresh is async and best-effort: if one source (e.g. `volume ls`) fails, 
 | Parsed % gauge for image pulls                       | ✅ shipped | 0.4.0           |
 | Search-as-you-type in Logs tab (highlighted matches) | ✅ shipped | 0.4.0           |
 | `Esc` backgrounds pull modal · `P` re-attaches       | ✅ shipped | 0.4.0           |
+| Volume detail: capacity + on-disk usage + fill gauge | ✅ shipped | 0.5.0           |
+| Per-tab help overlay (`?`)                           | ✅ shipped | 0.5.0           |
+| Mouse: click tabs and rows to select                 | ✅ shipped | 0.5.0           |
+| Persisted prefs (tab, sort, show-all) at `~/.config/cgui/state.json` | ✅ shipped | 0.5.0 |
 | Optional GUI front end (Tauri)                       | 🟡 planned | —               |
 
 ## Roadmap
 
 - Optional GUI front end (Tauri) sharing the same `container.rs` core
-- Volumes detail: mount usage / contents (pending CLI support)
-- Per-tab help overlay (`?`)
-- Mouse support: click-to-select rows, click tabs
-- Persist user preferences (last tab, sort key, show-all toggle) to `~/.config/cgui/`
+- Wheel scroll support in long views (logs, inspect, pull stream)
+- Right-click context menu (start/stop/inspect quick actions)
+- Configurable color theme via `~/.config/cgui/theme.toml`
+- Image build progress modal (parallel of pull modal)

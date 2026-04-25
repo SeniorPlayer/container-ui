@@ -257,6 +257,106 @@ pub async fn delete(id: &str) -> Result<()> {
     run(&["delete", id]).await.map(|_| ())
 }
 
+/// Volume detail: pretty-printed `container volume inspect <name>` JSON
+/// plus a header derived from filesystem stat of the backing image: capacity
+/// from the CLI, actual on-disk usage from `metadata().len()`, fill ratio,
+/// and a unicode bar gauge.
+pub async fn volume_detail(name: &str) -> Result<String> {
+    let bytes = run(&["volume", "inspect", name]).await?;
+    let parsed: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    // `inspect` returns an array; take the first entry.
+    let v = parsed
+        .get(0)
+        .cloned()
+        .unwrap_or_else(|| parsed.clone());
+    let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| {
+        String::from_utf8_lossy(&bytes).into_owned()
+    });
+
+    let source = v
+        .get("source")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let capacity = v
+        .get("sizeInBytes")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let driver = v.get("driver").and_then(|x| x.as_str()).unwrap_or("?");
+    let format = v.get("format").and_then(|x| x.as_str()).unwrap_or("?");
+    let created = v.get("createdAt").and_then(|x| x.as_str()).unwrap_or("?");
+
+    let on_disk = if source.is_empty() {
+        None
+    } else {
+        std::fs::metadata(&source).ok().map(|m| m.len())
+    };
+
+    let mut header = String::new();
+    use std::fmt::Write as _;
+    let _ = writeln!(header, "== Volume: {name} ==");
+    let _ = writeln!(header, "Driver:    {driver}");
+    let _ = writeln!(header, "Format:    {format}");
+    let _ = writeln!(header, "Created:   {created}");
+    let _ = writeln!(header, "Source:    {source}");
+    if capacity > 0 {
+        let _ = writeln!(header, "Capacity:  {} ({} bytes)", human_bytes(capacity), capacity);
+    } else {
+        let _ = writeln!(header, "Capacity:  unknown");
+    }
+    match on_disk {
+        Some(used) => {
+            let pct = if capacity > 0 {
+                (used as f64 / capacity as f64) * 100.0
+            } else {
+                0.0
+            };
+            let _ = writeln!(
+                header,
+                "On disk:   {} ({} bytes) — sparse {:.3}% of capacity",
+                human_bytes(used),
+                used,
+                pct
+            );
+            let _ = writeln!(header, "Fill:      [{}] {:>5.1}%", bar_gauge(pct, 30), pct);
+        }
+        None => {
+            let _ = writeln!(header, "On disk:   unavailable (cannot stat source)");
+        }
+    }
+    let _ = writeln!(header, "\n== Inspect ==");
+
+    Ok(format!("{header}{pretty}"))
+}
+
+fn human_bytes(n: u64) -> String {
+    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    let mut v = n as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i + 1 < UNITS.len() {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{n} {}", UNITS[0])
+    } else {
+        format!("{v:.2} {}", UNITS[i])
+    }
+}
+
+fn bar_gauge(pct: f64, width: usize) -> String {
+    let pct = pct.clamp(0.0, 100.0);
+    let filled = ((pct / 100.0) * width as f64).round() as usize;
+    let mut s = String::with_capacity(width);
+    for _ in 0..filled {
+        s.push('█');
+    }
+    for _ in filled..width {
+        s.push('░');
+    }
+    s
+}
+
 /// Pretty-printed `container inspect <id>` JSON. Falls back to raw stdout if
 /// the response isn't valid JSON for any reason.
 pub async fn inspect(id: &str) -> Result<String> {
