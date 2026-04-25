@@ -4,6 +4,7 @@ mod container;
 mod jsonhl;
 mod prefs;
 mod pullprog;
+mod theme;
 mod ui;
 
 use anyhow::Result;
@@ -21,7 +22,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{io::stdout, time::Duration};
 use tokio::time::{interval, MissedTickBehavior};
 
-use crate::app::{App, Mode, Tab};
+use crate::app::{App, ContextAction, ContextMenu, Mode, OperationKind, Tab};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -75,9 +76,10 @@ async fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>) -> Res
                 let h = pull_handle.take().unwrap();
                 let res = h.await.unwrap_or_else(|e| Err(anyhow::anyhow!("join: {e}")));
                 app.pull_running = false;
+                let verb = app.op_kind.verb();
                 match res {
-                    Ok(()) => app.set_status("Pull complete."),
-                    Err(e) => app.set_status(format!("Pull failed: {e}")),
+                    Ok(()) => app.set_status(format!("{verb} complete.")),
+                    Err(e) => app.set_status(format!("{verb} failed: {e}")),
                 }
                 app.refresh().await.ok();
             }
@@ -109,18 +111,56 @@ async fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>) -> Res
 }
 
 async fn handle_mouse(app: &mut App, m: MouseEvent) {
+    // Wheel scroll first — works in any mode that has a scrollable view.
+    match m.kind {
+        MouseEventKind::ScrollDown => return wheel(app, 3),
+        MouseEventKind::ScrollUp => return wheel(app, -3),
+        _ => {}
+    }
+
+    // Right-click → context menu (browse mode only).
+    if let MouseEventKind::Down(MouseButton::Right) = m.kind {
+        if app.mode == Mode::Browse {
+            open_context_menu(app, m.column, m.row);
+        }
+        return;
+    }
+
+    // From here on, only handle left-clicks.
     if !matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
         return;
     }
-    // Block clicks while overlays are up (other than the help overlay, which
-    // also closes on click anywhere).
-    match app.mode {
-        app::Mode::Help => {
-            app.mode = app::Mode::Browse;
-            return;
+
+    // Help overlay dismisses on any click.
+    if app.mode == Mode::Help {
+        app.mode = Mode::Browse;
+        return;
+    }
+    // Context menu: click an item to activate, click elsewhere to dismiss.
+    if app.mode == Mode::ContextMenu {
+        let menu_rect = context_menu_rect(app);
+        if let (Some(menu), Some(r)) = (app.context_menu.clone(), menu_rect) {
+            if hit(r, m.column, m.row) {
+                let idx = (m.row.saturating_sub(r.y).saturating_sub(1)) as usize;
+                if idx < menu.items.len() {
+                    let action = menu.items[idx].1;
+                    app.mode = Mode::Browse;
+                    app.context_menu = None;
+                    invoke_context_action(app, action).await;
+                    return;
+                }
+            }
         }
-        app::Mode::Detail | app::Mode::PromptPull | app::Mode::PullProgress => return,
-        _ => {}
+        app.mode = Mode::Browse;
+        app.context_menu = None;
+        return;
+    }
+    // Other overlays swallow left-clicks rather than mis-firing on chrome.
+    if matches!(
+        app.mode,
+        Mode::Detail | Mode::PromptPull | Mode::PromptBuild | Mode::PullProgress
+    ) {
+        return;
     }
 
     if let Some(tabs) = app.layout.tabs {
@@ -139,6 +179,122 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) {
                 app.selected = row;
             }
         }
+    }
+}
+
+fn wheel(app: &mut App, delta: i32) {
+    let bump = |s: &mut u16| {
+        if delta > 0 {
+            *s = s.saturating_add(delta as u16);
+        } else {
+            *s = s.saturating_sub((-delta) as u16);
+        }
+    };
+    match app.mode {
+        Mode::Detail => bump(&mut app.detail_scroll),
+        Mode::PullProgress => bump(&mut app.op_scroll),
+        Mode::Help | Mode::PromptPull | Mode::PromptBuild | Mode::ContextMenu => {}
+        _ => {
+            if app.tab == Tab::Logs {
+                bump(&mut app.log_scroll);
+            }
+        }
+    }
+}
+
+fn open_context_menu(app: &mut App, x: u16, y: u16) {
+    let items: Vec<(String, ContextAction)> = match app.tab {
+        Tab::Containers => vec![
+            ("Inspect".into(), ContextAction::Inspect),
+            ("Logs".into(), ContextAction::Logs),
+            ("Start".into(), ContextAction::Start),
+            ("Stop".into(), ContextAction::Stop),
+            ("Kill".into(), ContextAction::Kill),
+            ("Delete".into(), ContextAction::Delete),
+            ("Exec /bin/sh".into(), ContextAction::Exec),
+            ("Refresh".into(), ContextAction::Refresh),
+            ("Toggle show-all".into(), ContextAction::ToggleAll),
+            ("Help".into(), ContextAction::Help),
+        ],
+        Tab::Images => vec![
+            ("Inspect".into(), ContextAction::Inspect),
+            ("Pull image…".into(), ContextAction::Pull),
+            ("Delete".into(), ContextAction::Delete),
+            ("Refresh".into(), ContextAction::Refresh),
+            ("Help".into(), ContextAction::Help),
+        ],
+        Tab::Volumes | Tab::Networks => vec![
+            ("Inspect".into(), ContextAction::Inspect),
+            ("Refresh".into(), ContextAction::Refresh),
+            ("Help".into(), ContextAction::Help),
+        ],
+        Tab::Logs => vec![
+            ("Refresh".into(), ContextAction::Refresh),
+            ("Help".into(), ContextAction::Help),
+        ],
+    };
+    // Snap selection to the row under the cursor where useful.
+    if let Some(body) = app.layout.body {
+        if hit(body, x, y) {
+            let row = (y.saturating_sub(body.y)) as usize;
+            let n = app.row_count();
+            if n > 0 && row < n {
+                app.selected = row;
+            }
+        }
+    }
+    app.context_menu = Some(ContextMenu {
+        x,
+        y,
+        items,
+        selected: 0,
+    });
+    app.mode = Mode::ContextMenu;
+}
+
+fn context_menu_rect(app: &App) -> Option<ratatui::layout::Rect> {
+    let area = app.layout.body?; // approximation of total drawable area
+    let menu = app.context_menu.as_ref()?;
+    let width: u16 = (menu
+        .items
+        .iter()
+        .map(|(l, _)| l.chars().count())
+        .max()
+        .unwrap_or(10) as u16)
+        .saturating_add(4);
+    let height: u16 = (menu.items.len() as u16).saturating_add(2);
+    let max_x = area.x + area.width;
+    let max_y = area.y + area.height;
+    let x = menu.x.min(max_x.saturating_sub(width));
+    let y = menu.y.min(max_y.saturating_sub(height));
+    Some(ratatui::layout::Rect { x, y, width, height })
+}
+
+async fn invoke_context_action(app: &mut App, action: ContextAction) {
+    match action {
+        ContextAction::Inspect => open_detail(app).await,
+        ContextAction::Logs => load_logs(app).await,
+        ContextAction::Start => batch_action(app, "start").await,
+        ContextAction::Stop => batch_action(app, "stop").await,
+        ContextAction::Kill => batch_action(app, "kill").await,
+        ContextAction::Delete => batch_action(app, "delete").await,
+        ContextAction::Exec => app.set_status("exec from menu: press 'e' on the row"),
+        ContextAction::Pull => {
+            app.prompt_buf.clear();
+            app.mode = Mode::PromptPull;
+            app.set_status("Type image reference, Enter to pull");
+        }
+        ContextAction::Refresh => {
+            app.set_status("Refreshing…");
+            app.refresh().await.ok();
+            app.set_status("Refreshed.");
+        }
+        ContextAction::ToggleAll => {
+            app.show_all = !app.show_all;
+            app.save_prefs();
+            app.refresh().await.ok();
+        }
+        ContextAction::Help => app.mode = Mode::Help,
     }
 }
 
@@ -214,7 +370,9 @@ async fn handle_key<B: ratatui::backend::Backend>(
                         v.clear();
                     }
                     app.pull_running = true;
+                    app.op_kind = OperationKind::Pull;
                     app.pull_reference = Some(reference.clone());
+                    app.op_scroll = 0;
                     *pull_handle = Some(container::spawn_pull(reference.clone(), app.pull_log.clone()));
                     app.mode = Mode::PullProgress;
                     app.set_status(format!("pulling {reference}…"));
@@ -263,6 +421,92 @@ async fn handle_key<B: ratatui::backend::Backend>(
         Mode::Help => {
             if matches!(code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') | KeyCode::Enter) {
                 app.mode = Mode::Browse;
+            }
+            return Ok(());
+        }
+        Mode::ContextMenu => {
+            let len = app.context_menu.as_ref().map(|m| m.items.len()).unwrap_or(0);
+            match code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    app.mode = Mode::Browse;
+                    app.context_menu = None;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if let Some(m) = app.context_menu.as_mut() {
+                        if !m.items.is_empty() {
+                            m.selected = (m.selected + 1).min(m.items.len() - 1);
+                        }
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if let Some(m) = app.context_menu.as_mut() {
+                        if m.selected > 0 {
+                            m.selected -= 1;
+                        }
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some(m) = app.context_menu.as_ref() {
+                        if !m.items.is_empty() && m.selected < len {
+                            let action = m.items[m.selected].1;
+                            app.mode = Mode::Browse;
+                            app.context_menu = None;
+                            invoke_context_action(app, action).await;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+        Mode::PromptBuild => {
+            match code {
+                KeyCode::Esc => {
+                    app.build_path.clear();
+                    app.build_tag.clear();
+                    app.build_field = 0;
+                    app.mode = Mode::Browse;
+                    app.reset_status();
+                }
+                KeyCode::Tab => app.build_field = if app.build_field == 0 { 1 } else { 0 },
+                KeyCode::Enter => {
+                    let path = app.build_path.trim().to_string();
+                    if path.is_empty() {
+                        app.set_status("build cancelled (empty context path)");
+                        app.mode = Mode::Browse;
+                        return Ok(());
+                    }
+                    let tag = if app.build_tag.trim().is_empty() {
+                        None
+                    } else {
+                        Some(app.build_tag.trim().to_string())
+                    };
+                    if let Ok(mut v) = app.pull_log.lock() {
+                        v.clear();
+                    }
+                    app.pull_running = true;
+                    app.op_kind = OperationKind::Build;
+                    app.pull_reference = Some(tag.clone().unwrap_or_else(|| path.clone()));
+                    app.op_scroll = 0;
+                    *pull_handle = Some(container::spawn_build(path.clone(), tag, app.pull_log.clone()));
+                    app.mode = Mode::PullProgress;
+                    app.set_status(format!("building {path}…"));
+                }
+                KeyCode::Backspace => {
+                    if app.build_field == 0 {
+                        app.build_path.pop();
+                    } else {
+                        app.build_tag.pop();
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if app.build_field == 0 {
+                        app.build_path.push(c);
+                    } else {
+                        app.build_tag.push(c);
+                    }
+                }
+                _ => {}
             }
             return Ok(());
         }
@@ -362,6 +606,13 @@ async fn handle_key<B: ratatui::backend::Backend>(
             app.mode = Mode::PromptPull;
             app.set_status("Type image reference, Enter to pull");
         }
+        KeyCode::Char('b') if app.tab == Tab::Images => {
+            app.build_path.clear();
+            app.build_tag.clear();
+            app.build_field = 0;
+            app.mode = Mode::PromptBuild;
+            app.set_status("Build context path, then Tab → tag, Enter to start");
+        }
         KeyCode::Char(' ') if app.tab == Tab::Containers => {
             app.toggle_mark_current_container();
             app.move_down();
@@ -434,7 +685,8 @@ async fn load_logs(app: &mut App) {
         Ok(s) => {
             app.logs = s;
             app.log_target = Some(id);
-            app.tab = Tab::Logs;
+            app.log_scroll = 0;
+            app.set_tab(Tab::Logs);
             app.set_status("Logs loaded.");
         }
         Err(e) => app.set_status(format!("logs error: {e}")),

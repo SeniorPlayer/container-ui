@@ -422,6 +422,65 @@ pub fn spawn_pull(
     })
 }
 
+/// Streaming build. Runs `container build [-t <tag>] <context_path>` and
+/// pipes both stdout and stderr line-by-line into the shared sink. Mirrors
+/// `spawn_pull` so both can share the same modal renderer.
+pub fn spawn_build(
+    context_path: String,
+    tag: Option<String>,
+    sink: Arc<Mutex<Vec<String>>>,
+) -> tokio::task::JoinHandle<Result<()>> {
+    tokio::spawn(async move {
+        let mut args: Vec<String> = vec!["build".into()];
+        if let Some(ref t) = tag {
+            args.push("-t".into());
+            args.push(t.clone());
+        }
+        args.push(context_path.clone());
+        push(
+            &sink,
+            format!("$ container {}", args.join(" ")),
+        );
+        let mut child = Command::new(BIN)
+            .args(args.iter().map(|s| s.as_str()))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("spawn build {context_path}"))?;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let s1 = sink.clone();
+        let s2 = sink.clone();
+        let t_out = tokio::spawn(async move {
+            if let Some(out) = stdout {
+                let mut lines = BufReader::new(out).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    push(&s1, line);
+                }
+            }
+        });
+        let t_err = tokio::spawn(async move {
+            if let Some(err) = stderr {
+                let mut lines = BufReader::new(err).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    push(&s2, line);
+                }
+            }
+        });
+        let status = child.wait().await?;
+        let _ = t_out.await;
+        let _ = t_err.await;
+        if status.success() {
+            push(&sink, format!("✓ built {}", tag.as_deref().unwrap_or(&context_path)));
+            Ok(())
+        } else {
+            let msg = format!("✗ build failed ({status})");
+            push(&sink, msg.clone());
+            Err(anyhow!(msg))
+        }
+    })
+}
+
 fn push(sink: &Arc<Mutex<Vec<String>>>, line: String) {
     if let Ok(mut v) = sink.lock() {
         // Cap to avoid unbounded growth on a runaway pull.

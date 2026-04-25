@@ -2,6 +2,7 @@
 
 use crate::container::{self, Container, Image, Network, StatRow, Volume};
 use crate::prefs::Prefs;
+use crate::theme::Theme;
 use anyhow::Result;
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -58,10 +59,64 @@ pub enum Mode {
     PromptPull,
     Detail,
     PullProgress,
+    /// Two-field prompt for `container build`: context path + tag.
+    PromptBuild,
     /// Search-as-you-type within the Logs tab. Highlights matching substrings
     /// in place; Enter exits but keeps the highlight; Esc clears.
     LogSearch,
     /// Help overlay listing keybindings for the current tab.
+    Help,
+    /// Right-click context menu near the click position.
+    ContextMenu,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum OperationKind {
+    Pull,
+    Build,
+}
+
+impl OperationKind {
+    pub fn verb(self) -> &'static str {
+        match self {
+            OperationKind::Pull => "pull",
+            OperationKind::Build => "build",
+        }
+    }
+    pub fn participle(self) -> &'static str {
+        match self {
+            OperationKind::Pull => "Pulling",
+            OperationKind::Build => "Building",
+        }
+    }
+    pub fn done(self) -> &'static str {
+        match self {
+            OperationKind::Pull => "Pulled",
+            OperationKind::Build => "Built",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ContextMenu {
+    pub x: u16,
+    pub y: u16,
+    pub items: Vec<(String, ContextAction)>,
+    pub selected: usize,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ContextAction {
+    Inspect,
+    Logs,
+    Start,
+    Stop,
+    Kill,
+    Delete,
+    Exec,
+    Pull,
+    Refresh,
+    ToggleAll,
     Help,
 }
 
@@ -141,6 +196,25 @@ pub struct App {
 
     /// Loaded-from-disk and saved-back preferences.
     pub prefs: Prefs,
+
+    /// Color theme (loaded once at startup).
+    pub theme: Theme,
+
+    /// What kind of operation is currently running in the modal (pull or build).
+    pub op_kind: OperationKind,
+
+    /// Path of the build context for an in-flight `container build`.
+    pub build_path: String,
+    /// Two-field prompt buffer for build: 0 = path, 1 = tag.
+    pub build_field: u8,
+    pub build_tag: String,
+
+    /// Scroll offsets for long views — wheel events bump these.
+    pub log_scroll: u16,
+    pub op_scroll: u16,
+
+    /// Right-click context menu, when open.
+    pub context_menu: Option<ContextMenu>,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -191,6 +265,14 @@ impl App {
             marked: HashSet::new(),
             log_search: String::new(),
             pull_reference: None,
+            theme: Theme::load(),
+            op_kind: OperationKind::Pull,
+            build_path: String::new(),
+            build_field: 0,
+            build_tag: String::new(),
+            log_scroll: 0,
+            op_scroll: 0,
+            context_menu: None,
         }
     }
 

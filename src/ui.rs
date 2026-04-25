@@ -43,8 +43,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     match app.mode {
         Mode::Detail => draw_detail_overlay(f, app, area),
         Mode::PromptPull => draw_prompt_overlay(f, app, area),
+        Mode::PromptBuild => draw_build_prompt_overlay(f, app, area),
         Mode::PullProgress => draw_pull_overlay(f, app, area),
         Mode::Help => draw_help_overlay(f, app, area),
+        Mode::ContextMenu => draw_context_menu(f, app, area),
         Mode::Browse | Mode::Filter | Mode::LogSearch => {}
     }
 }
@@ -368,7 +370,7 @@ fn draw_networks(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
     let title = match (&app.log_target, app.log_search.is_empty()) {
-        (Some(id), true) => format!(" Logs · {id} (/ search · l reload) "),
+        (Some(id), true) => format!(" Logs · {id} (/ search · l reload · wheel scrolls) "),
         (Some(id), false) => format!(
             " Logs · {id} · search:{}  ({} matches) ",
             app.log_search,
@@ -390,6 +392,7 @@ fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
 
     let p = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
+        .scroll((app.log_scroll, 0))
         .block(Block::default().borders(Borders::ALL).title(title));
     f.render_widget(p, area);
 }
@@ -686,13 +689,15 @@ fn draw_pull_overlay(f: &mut Frame, app: &App, area: Rect) {
     let progress = pullprog::parse_progress(&lines);
     let status_line = pullprog::status_label(&lines);
 
+    let participle = app.op_kind.participle();
+    let done = app.op_kind.done();
     let title = match (&app.pull_reference, app.pull_running) {
-        (Some(r), true) => format!(" Pulling {r} · Esc backgrounds (P re-attach) "),
-        (Some(r), false) => format!(" Pulled {r} · Esc closes "),
-        (None, true) => " Pulling… · Esc backgrounds (P re-attach) ".to_string(),
-        (None, false) => " Pull complete · Esc closes ".to_string(),
+        (Some(r), true) => format!(" {participle} {r} · Esc backgrounds (P re-attach) "),
+        (Some(r), false) => format!(" {done} {r} · Esc closes "),
+        (None, true) => format!(" {participle}… · Esc backgrounds (P re-attach) "),
+        (None, false) => format!(" {done} · Esc closes "),
     };
-    let border_color = if app.pull_running { Color::Yellow } else { Color::Green };
+    let border_color = if app.pull_running { app.theme.warning } else { app.theme.success };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -715,11 +720,11 @@ fn draw_pull_overlay(f: &mut Frame, app: &App, area: Rect) {
         (None, false) => "done".to_string(),
     };
     let gauge_color = if !app.pull_running || pct >= 0.66 {
-        Color::Green
+        app.theme.success
     } else if pct >= 0.33 {
-        Color::Yellow
+        app.theme.warning
     } else {
-        Color::Cyan
+        app.theme.accent
     };
     let g = Gauge::default()
         .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(Color::DarkGray)))
@@ -728,12 +733,108 @@ fn draw_pull_overlay(f: &mut Frame, app: &App, area: Rect) {
         .label(Span::styled(gauge_label, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)));
     f.render_widget(g, split[0]);
 
-    // --- Stream tail ---
+    // --- Stream body ---
+    // When the user has scrolled (op_scroll > 0), show from the top with that
+    // offset. Otherwise auto-tail to the last screenful so a long pull keeps
+    // the latest line visible without extra interaction.
     let h = split[1].height as usize;
-    let start = lines.len().saturating_sub(h);
-    let body = lines[start..].join("\n");
-    let p = Paragraph::new(body).wrap(Wrap { trim: false });
+    let body = if app.op_scroll == 0 {
+        let start = lines.len().saturating_sub(h);
+        lines[start..].join("\n")
+    } else {
+        lines.join("\n")
+    };
+    let p = Paragraph::new(body)
+        .wrap(Wrap { trim: false })
+        .scroll((app.op_scroll, 0));
     f.render_widget(p, split[1]);
+}
+
+fn draw_build_prompt_overlay(f: &mut Frame, app: &App, area: Rect) {
+    let r = centered(area, 70, 30);
+    f.render_widget(Clear, r);
+    let label = |text: &str, active: bool| -> Span<'static> {
+        Span::styled(
+            text.to_string(),
+            if active {
+                Style::default().fg(app.theme.warning).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(app.theme.muted)
+            },
+        )
+    };
+    let cursor_for = |i: u8| if app.build_field == i { "█" } else { " " };
+    let body = Paragraph::new(vec![
+        Line::from(label("Build context (path or URL):", app.build_field == 0)),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(&app.build_path, Style::default().fg(app.theme.warning)),
+            Span::styled(cursor_for(0), Style::default().fg(app.theme.warning)),
+        ]),
+        Line::from(""),
+        Line::from(label("Tag (optional, e.g. myapp:latest):", app.build_field == 1)),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(&app.build_tag, Style::default().fg(app.theme.warning)),
+            Span::styled(cursor_for(1), Style::default().fg(app.theme.warning)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Tab switches fields · Enter starts build · Esc cancels",
+            Style::default().fg(app.theme.muted),
+        )),
+    ])
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(app.theme.accent))
+            .title(Span::styled(
+                " Build image ",
+                Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD),
+            )),
+    );
+    f.render_widget(body, r);
+}
+
+fn draw_context_menu(f: &mut Frame, app: &App, area: Rect) {
+    let Some(menu) = &app.context_menu else { return };
+    let width: u16 = (menu
+        .items
+        .iter()
+        .map(|(l, _)| l.chars().count())
+        .max()
+        .unwrap_or(10) as u16)
+        .saturating_add(4);
+    let height: u16 = (menu.items.len() as u16).saturating_add(2);
+    // Anchor near the click but keep on-screen.
+    let x = menu.x.min(area.width.saturating_sub(width));
+    let y = menu.y.min(area.height.saturating_sub(height));
+    let r = Rect { x, y, width, height };
+    f.render_widget(Clear, r);
+
+    let lines: Vec<Line> = menu
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, (label, _))| {
+            let is_sel = i == menu.selected;
+            let style = if is_sel {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(app.theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(app.theme.primary)
+            };
+            Line::from(Span::styled(format!(" {label} "), style))
+        })
+        .collect();
+    let p = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(app.theme.accent)),
+    );
+    f.render_widget(p, r);
 }
 
 fn truncate(s: &str, max: usize) -> String {

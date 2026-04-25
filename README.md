@@ -65,9 +65,12 @@ cgui tui        # same
 | `l`            | Load logs for selected → Logs tab               |
 | `e`            | **Exec** — drop into `/bin/sh` in selected container (Ctrl-D returns to TUI) |
 | `p`            | **Pull** an image (Images tab) — opens prompt + live progress modal |
-| `P`            | **Re-attach** to a backgrounded pull (running or recently-finished) |
+| `b`            | **Build** an image (Images tab) — two-field prompt, then streaming modal |
+| `P`            | **Re-attach** to a backgrounded pull or build      |
 | `?`            | Toggle the **per-tab help** overlay                |
-| **Mouse**      | Click a tab title to switch tabs · click a row to select it |
+| **Mouse L**    | Click a tab title to switch tabs · click a row to select it |
+| **Mouse R**    | Right-click anywhere → **context menu** of actions for the current tab |
+| **Wheel**      | Scroll Logs · Inspect detail · Pull/Build stream   |
 
 On the Logs tab `/` enters **search-as-you-type**: matches highlight in yellow as you type, with a live match counter in the title (`Logs · foo · search:err  (4 matches)`). Enter exits the input but keeps the highlight; `Esc` clears.
 
@@ -78,6 +81,23 @@ The Containers table shows **live CPU% and MEM** (used / limit) per row when a s
 On the **Volumes tab**, `Enter` opens a richer detail pane: capacity from the CLI, actual on-disk size from the backing image (sparse images are honest about it), a unicode fill bar (`[████░░░░░░] 42.3%`), and the full inspect JSON below.
 
 User preferences (last tab, per-tab sort key, show-all toggle) are persisted to `$XDG_CONFIG_HOME/cgui/state.json` (defaults to `~/.config/cgui/state.json`). Saved on every relevant change and on quit; missing or malformed files are silently ignored.
+
+### Theme
+
+Drop a `theme.toml` next to the state file:
+
+```toml
+# ~/.config/cgui/theme.toml — all fields optional
+accent  = "#88c0d0"   # tab highlight, modal borders, headers
+primary = "white"     # default body text
+muted   = "darkgray"  # punctuation, hints, dim labels
+success = "#a3be8c"   # running status, ok results
+warning = "yellow"    # marks, mid-progress, in-flight
+danger  = "red"       # stopped, errors, high CPU
+info    = "blue"      # image refs, links
+```
+
+Accepts named colors (`red`, `darkgray`, `lightcyan`, …), `#RRGGBB`, and `rgb(r, g, b)` for truecolor terminals. Missing fields fall back to the built-in defaults; a malformed file is silently ignored.
 
 In the Detail pane: `↑↓`/`PgUp`/`PgDn` scroll, `Esc` closes.
 In the Pull modal: `Esc` hides; pull keeps running in the background and the status bar reports completion.
@@ -137,12 +157,16 @@ State refresh is async and best-effort: if one source (e.g. `volume ls`) fails, 
 | Per-tab help overlay (`?`)                           | ✅ shipped | 0.5.0           |
 | Mouse: click tabs and rows to select                 | ✅ shipped | 0.5.0           |
 | Persisted prefs (tab, sort, show-all) at `~/.config/cgui/state.json` | ✅ shipped | 0.5.0 |
-| Optional GUI front end (Tauri)                       | 🟡 planned | —               |
+| Wheel scroll in long views (logs, inspect, op stream) | ✅ shipped | 0.6.0          |
+| Right-click context menu                              | ✅ shipped | 0.6.0          |
+| Configurable theme via `~/.config/cgui/theme.toml`    | ✅ shipped | 0.6.0          |
+| `b` image build with same streaming progress modal    | ✅ shipped | 0.6.0          |
+| Optional GUI front end (Tauri)                        | 🟡 planned | —              |
 
 ## Roadmap
 
 - Optional GUI front end (Tauri) sharing the same `container.rs` core
-- Wheel scroll support in long views (logs, inspect, pull stream)
-- Right-click context menu (start/stop/inspect quick actions)
-- Configurable color theme via `~/.config/cgui/theme.toml`
-- Image build progress modal (parallel of pull modal)
+- Build context picker (file dialog) instead of typed path
+- Multi-line log search with regex toggle
+- Resource graphs per-container (sparkline column)
+- `cgui ctx <name>` to switch active container runtime profile
