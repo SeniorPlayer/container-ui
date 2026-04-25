@@ -47,6 +47,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::PullProgress => draw_pull_overlay(f, app, area),
         Mode::Help => draw_help_overlay(f, app, area),
         Mode::ContextMenu => draw_context_menu(f, app, area),
+        Mode::FilePicker => draw_file_picker(f, app, area),
+        Mode::ProfilePicker => draw_profile_picker(f, app, area),
         Mode::Browse | Mode::Filter | Mode::LogSearch => {}
     }
 }
@@ -68,13 +70,14 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
         .map(|t| Line::from(Span::styled(t.label(), Style::default().fg(Color::White))))
         .collect();
     let idx = Tab::ALL.iter().position(|t| *t == app.tab).unwrap_or(0);
+    let title = format!(" cgui · runtime: {} ", crate::runtime::name());
     let tabs = Tabs::new(titles)
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .title(Span::styled(
-                    " cgui · Apple container front end ",
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    title,
+                    Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD),
                 )),
         )
         .select(idx)
@@ -159,7 +162,7 @@ fn block_title(app: &App, label: &str, total: usize, shown: usize) -> String {
 }
 
 fn draw_containers(f: &mut Frame, app: &mut App, area: Rect) {
-    let header = Row::new(vec!["", "ID", "IMAGE", "STATUS", "CPU%", "MEM", "PORTS"])
+    let header = Row::new(vec!["", "ID", "IMAGE", "STATUS", "CPU%", "TREND", "MEM", "PORTS"])
         .style(header_style());
     let view = app.view_indices();
     let stats = app.stats_by_id();
@@ -211,12 +214,17 @@ fn draw_containers(f: &mut Frame, app: &mut App, area: Rect) {
                 ),
             };
 
+            let trend_history = app.cpu_history_per_id.get(&c.id);
+            let trend = sparkline_str(trend_history.map(|h| h.iter().copied()).into_iter().flatten(), 16);
+            let trend_cell = Cell::from(trend).style(Style::default().fg(app.theme.success));
+
             Row::new(vec![
                 mark,
                 Cell::from(c.id.clone()),
                 Cell::from(c.image.clone()).style(Style::default().fg(Color::Blue)),
                 Cell::from(c.status.clone()).style(status_style),
                 cpu_cell,
+                trend_cell,
                 mem_cell,
                 Cell::from(c.ports.join(", ")),
             ])
@@ -224,10 +232,11 @@ fn draw_containers(f: &mut Frame, app: &mut App, area: Rect) {
         .collect();
     let widths = [
         Constraint::Length(2),
-        Constraint::Percentage(22),
-        Constraint::Percentage(30),
+        Constraint::Percentage(20),
+        Constraint::Percentage(28),
         Constraint::Length(10),
         Constraint::Length(7),
+        Constraint::Length(16),
         Constraint::Length(20),
         Constraint::Min(10),
     ];
@@ -248,6 +257,31 @@ fn draw_containers(f: &mut Frame, app: &mut App, area: Rect) {
     let mut state = TableState::default();
     state.select(Some(app.selected));
     f.render_stateful_widget(table, area, &mut state);
+}
+
+/// Render a sequence of CPU% samples as a unicode bar chart, right-aligned to
+/// `width` characters (newest sample at the right). Empty / single-sample
+/// histories render as spaces.
+fn sparkline_str<I: IntoIterator<Item = f64>>(samples: I, width: usize) -> String {
+    const BARS: &[char] = &[' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let mut v: Vec<f64> = samples.into_iter().collect();
+    if v.is_empty() {
+        return " ".repeat(width);
+    }
+    if v.len() > width {
+        v.drain(0..v.len() - width);
+    }
+    let max = v.iter().copied().fold(0.0_f64, f64::max).max(1.0);
+    let mut s = String::with_capacity(width);
+    let pad = width - v.len();
+    for _ in 0..pad {
+        s.push(' ');
+    }
+    for x in v {
+        let idx = ((x / max) * (BARS.len() - 1) as f64).round() as usize;
+        s.push(BARS[idx.min(BARS.len() - 1)]);
+    }
+    s
 }
 
 fn cpu_color(pct: f64) -> Style {
@@ -369,13 +403,32 @@ fn draw_networks(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
+    let mode_tag = if app.log_search_regex { "regex" } else { "text" };
+    let compiled_re = if app.log_search_regex && !app.log_search.is_empty() {
+        regex::RegexBuilder::new(&app.log_search)
+            .case_insensitive(true)
+            .build()
+            .ok()
+    } else {
+        None
+    };
+    let match_count = if let Some(re) = &compiled_re {
+        count_regex_matches(&app.logs, re)
+    } else if !app.log_search.is_empty() {
+        count_matches(&app.logs, &app.log_search)
+    } else {
+        0
+    };
     let title = match (&app.log_target, app.log_search.is_empty()) {
-        (Some(id), true) => format!(" Logs · {id} (/ search · l reload · wheel scrolls) "),
-        (Some(id), false) => format!(
-            " Logs · {id} · search:{}  ({} matches) ",
-            app.log_search,
-            count_matches(&app.logs, &app.log_search)
-        ),
+        (Some(id), true) => format!(" Logs · {id} (/ search · ^R regex · l reload · wheel scrolls) "),
+        (Some(id), false) => {
+            let bad = compiled_re.is_none() && app.log_search_regex;
+            if bad {
+                format!(" Logs · {id} · {mode_tag}:{}  (regex error) ", app.log_search)
+            } else {
+                format!(" Logs · {id} · {mode_tag}:{}  ({} matches) ", app.log_search, match_count)
+            }
+        }
         (None, _) => " Logs (select a container, press l) ".to_string(),
     };
 
@@ -383,6 +436,8 @@ fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
         vec![Line::from("No logs loaded.")]
     } else if app.log_search.is_empty() {
         app.logs.lines().map(|l| Line::from(l.to_string())).collect()
+    } else if let Some(re) = &compiled_re {
+        app.logs.lines().map(|l| highlight_regex(l, re)).collect()
     } else {
         app.logs
             .lines()
@@ -395,6 +450,92 @@ fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
         .scroll((app.log_scroll, 0))
         .block(Block::default().borders(Borders::ALL).title(title));
     f.render_widget(p, area);
+}
+
+fn draw_file_picker(f: &mut Frame, app: &App, area: Rect) {
+    let r = centered(area, 80, 70);
+    f.render_widget(Clear, r);
+    let title = format!(
+        " Pick build context · {} · Enter descend · . pick · Esc cancel ",
+        app.picker.path.display()
+    );
+    let lines: Vec<Line> = app
+        .picker
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let is_sel = i == app.picker.selected;
+            let icon = if e.is_dir { "📁" } else { "  " };
+            let text = format!(" {icon} {} ", e.name);
+            let style = if is_sel {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(app.theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else if e.is_dir {
+                Style::default().fg(app.theme.info).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(app.theme.muted)
+            };
+            Line::from(Span::styled(text, style))
+        })
+        .collect();
+    let p = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(app.theme.accent))
+            .title(Span::styled(
+                title,
+                Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD),
+            )),
+    );
+    f.render_widget(p, r);
+}
+
+fn draw_profile_picker(f: &mut Frame, app: &App, area: Rect) {
+    let r = centered(area, 60, 40);
+    f.render_widget(Clear, r);
+    let active = crate::runtime::name();
+    let lines: Vec<Line> = app
+        .profiles
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let is_sel = i == app.profile_picker_selected;
+            let active_marker = if p.name == active { "● " } else { "  " };
+            let text = format!(" {active_marker}{:<16}  {}", p.name, p.binary);
+            let style = if is_sel {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(app.theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else if p.name == active {
+                Style::default().fg(app.theme.success).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(app.theme.primary)
+            };
+            Line::from(Span::styled(text, style))
+        })
+        .collect();
+    let lines = if lines.is_empty() {
+        vec![Line::from(Span::styled(
+            "  no profiles loaded — see ~/.config/cgui/profiles.toml",
+            Style::default().fg(app.theme.muted),
+        ))]
+    } else {
+        lines
+    };
+    let p = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(app.theme.accent))
+            .title(Span::styled(
+                " Runtime profile · Enter activate · Esc cancel ",
+                Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD),
+            )),
+    );
+    f.render_widget(p, r);
 }
 
 fn count_matches(text: &str, needle: &str) -> usize {
@@ -414,6 +555,38 @@ fn count_matches(text: &str, needle: &str) -> usize {
             n
         })
         .sum()
+}
+
+fn count_regex_matches(text: &str, re: &regex::Regex) -> usize {
+    text.lines().map(|l| re.find_iter(l).count()).sum()
+}
+
+/// Highlight regex matches in a line. Any compile error is handled by the
+/// caller (we simply fall back to plain rendering there).
+fn highlight_regex(line: &str, re: &regex::Regex) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut cursor = 0usize;
+    for m in re.find_iter(line) {
+        if m.start() > cursor {
+            spans.push(Span::raw(line[cursor..m.start()].to_string()));
+        }
+        spans.push(Span::styled(
+            m.as_str().to_string(),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+        cursor = m.end();
+        // Avoid infinite loop on zero-width matches.
+        if m.end() == m.start() {
+            cursor += 1;
+        }
+    }
+    if cursor < line.len() {
+        spans.push(Span::raw(line[cursor..].to_string()));
+    }
+    Line::from(spans)
 }
 
 /// Render a single log line as a sequence of Spans, with case-insensitive
@@ -627,7 +800,8 @@ fn draw_help_overlay(f: &mut Frame, app: &App, area: Rect) {
     lines.push(h("r", "Refresh"));
     lines.push(h("a", "Toggle show-all vs running-only"));
     lines.push(h("?", "Toggle this help"));
-    lines.push(h("Mouse", "Click tab title or row to select"));
+    lines.push(h("X", "Switch runtime profile (container/docker/…)"));
+    lines.push(h("Mouse L/R", "Click row · right-click for menu · wheel scrolls"));
     lines.push(Line::from(""));
 
     match app.tab {
@@ -641,7 +815,8 @@ fn draw_help_overlay(f: &mut Frame, app: &App, area: Rect) {
         Tab::Images => {
             lines.push(section("Images"));
             lines.push(h("p", "Pull image (prompt + progress modal)"));
-            lines.push(h("P", "Re-attach to backgrounded pull"));
+            lines.push(h("b", "Build image (Ctrl-O opens file picker)"));
+            lines.push(h("P", "Re-attach to backgrounded pull or build"));
         }
         Tab::Volumes => {
             lines.push(section("Volumes"));
@@ -654,6 +829,7 @@ fn draw_help_overlay(f: &mut Frame, app: &App, area: Rect) {
         Tab::Logs => {
             lines.push(section("Logs"));
             lines.push(h("/", "Search-as-you-type (highlight matches)"));
+            lines.push(h("Ctrl-R", "Toggle regex search mode"));
             lines.push(h("Esc", "Clear search"));
         }
     }

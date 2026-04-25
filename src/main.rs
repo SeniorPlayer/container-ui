@@ -4,6 +4,7 @@ mod container;
 mod jsonhl;
 mod prefs;
 mod pullprog;
+mod runtime;
 mod theme;
 mod ui;
 
@@ -468,6 +469,21 @@ async fn handle_key<B: ratatui::backend::Backend>(
                     app.mode = Mode::Browse;
                     app.reset_status();
                 }
+                KeyCode::Char('o') if mods.contains(KeyModifiers::CONTROL) => {
+                    let start = if app.build_path.is_empty() {
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"))
+                    } else {
+                        std::path::PathBuf::from(&app.build_path)
+                    };
+                    let start = if start.is_dir() {
+                        start
+                    } else {
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"))
+                    };
+                    app.picker_load(start);
+                    app.mode = Mode::FilePicker;
+                    app.set_status("file picker · ↑↓ · Enter descend · . pick · Esc cancel");
+                }
                 KeyCode::Tab => app.build_field = if app.build_field == 0 { 1 } else { 0 },
                 KeyCode::Enter => {
                     let path = app.build_path.trim().to_string();
@@ -522,14 +538,92 @@ async fn handle_key<B: ratatui::backend::Backend>(
                     if app.log_search.is_empty() {
                         app.reset_status();
                     } else {
-                        app.set_status(format!("search: {}", app.log_search));
+                        let mode = if app.log_search_regex { "regex" } else { "text" };
+                        app.set_status(format!("{mode} search: {}", app.log_search));
                     }
+                }
+                KeyCode::Char('r') if mods.contains(KeyModifiers::CONTROL) => {
+                    app.log_search_regex = !app.log_search_regex;
+                    app.set_status(if app.log_search_regex {
+                        "regex search ON (^R toggles)"
+                    } else {
+                        "text search (^R for regex)"
+                    });
                 }
                 KeyCode::Backspace => {
                     app.log_search.pop();
                 }
                 KeyCode::Char(c) => {
                     app.log_search.push(c);
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+        Mode::FilePicker => {
+            match code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    app.mode = Mode::PromptBuild;
+                    app.reset_status();
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let n = app.picker.entries.len();
+                    if n > 0 {
+                        app.picker.selected = (app.picker.selected + 1).min(n - 1);
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if app.picker.selected > 0 {
+                        app.picker.selected -= 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some(e) = app.picker.entries.get(app.picker.selected).cloned() {
+                        if e.is_dir {
+                            let next = if e.name == ".." {
+                                app.picker
+                                    .path
+                                    .parent()
+                                    .map(|p| p.to_path_buf())
+                                    .unwrap_or(app.picker.path.clone())
+                            } else {
+                                app.picker.path.join(e.name)
+                            };
+                            app.picker_load(next);
+                        }
+                    }
+                }
+                KeyCode::Char('.') => {
+                    app.build_path = app.picker.path.to_string_lossy().into_owned();
+                    app.mode = Mode::PromptBuild;
+                    app.set_status(format!("context: {}", app.build_path));
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+        Mode::ProfilePicker => {
+            let n = app.profiles.len();
+            match code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    app.mode = Mode::Browse;
+                    app.reset_status();
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if n > 0 {
+                        app.profile_picker_selected = (app.profile_picker_selected + 1).min(n - 1);
+                    }
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if app.profile_picker_selected > 0 {
+                        app.profile_picker_selected -= 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    let idx = app.profile_picker_selected;
+                    app.select_profile(idx);
+                    app.mode = Mode::Browse;
+                    app.refresh().await.ok();
                 }
                 _ => {}
             }
@@ -574,6 +668,15 @@ async fn handle_key<B: ratatui::backend::Backend>(
         }
         KeyCode::Char('?') => {
             app.mode = Mode::Help;
+        }
+        KeyCode::Char('X') => {
+            app.profile_picker_selected = app
+                .profiles
+                .iter()
+                .position(|p| p.name == runtime::name())
+                .unwrap_or(0);
+            app.mode = Mode::ProfilePicker;
+            app.set_status("Pick a runtime profile · Enter activate · Esc cancel");
         }
         KeyCode::Char('/') => {
             if app.tab == Tab::Logs {

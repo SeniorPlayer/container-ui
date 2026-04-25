@@ -12,7 +12,10 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
-const BIN: &str = "container";
+/// Resolved at call-time from the active runtime profile.
+fn bin() -> String {
+    crate::runtime::binary()
+}
 
 #[derive(Debug, Clone)]
 pub struct Container {
@@ -60,15 +63,15 @@ pub struct StatRow {
 }
 
 async fn run(args: &[&str]) -> Result<Vec<u8>> {
-    let out = Command::new(BIN)
+    let out = Command::new(bin())
         .args(args)
         .output()
         .await
-        .with_context(|| format!("failed to spawn `{} {}`", BIN, args.join(" ")))?;
+        .with_context(|| format!("failed to spawn `{} {}`", bin(), args.join(" ")))?;
     if !out.status.success() {
         return Err(anyhow!(
             "`{} {}` exited {}: {}",
-            BIN,
+            bin(),
             args.join(" "),
             out.status,
             String::from_utf8_lossy(&out.stderr).trim()
@@ -238,7 +241,7 @@ pub async fn stats_snapshot() -> Result<Vec<StatRow>> {
 
 pub async fn logs(id: &str, tail: usize) -> Result<String> {
     // `container logs` doesn't take --tail in all versions; pull then trim.
-    let out = Command::new(BIN).args(["logs", id]).output().await?;
+    let out = Command::new(bin()).args(["logs", id]).output().await?;
     let s = String::from_utf8_lossy(&out.stdout).into_owned();
     let lines: Vec<&str> = s.lines().rev().take(tail).collect();
     Ok(lines.into_iter().rev().collect::<Vec<_>>().join("\n"))
@@ -378,7 +381,7 @@ pub fn spawn_pull(
 ) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move {
         push(&sink, format!("$ container image pull {reference}"));
-        let mut child = Command::new(BIN)
+        let mut child = Command::new(bin())
             .args(["image", "pull", &reference])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -441,7 +444,7 @@ pub fn spawn_build(
             &sink,
             format!("$ container {}", args.join(" ")),
         );
-        let mut child = Command::new(BIN)
+        let mut child = Command::new(bin())
             .args(args.iter().map(|s| s.as_str()))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

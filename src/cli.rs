@@ -58,7 +58,20 @@ pub fn dispatch_cli(cli: &Cli) -> Result<Option<i32>> {
     }
     let mapped = translate(verb);
     let rest = &cli.args[1..];
-    let status = Command::new("container")
+
+    // Honor the saved runtime profile so e.g. `cgui ps` hits the same binary
+    // the TUI does.
+    let profiles = crate::runtime::load_profiles();
+    let saved = crate::prefs::Prefs::load().profile;
+    let want = saved
+        .or_else(crate::runtime::default_name)
+        .unwrap_or_else(|| profiles[0].name.clone());
+    if let Some(p) = profiles.iter().find(|p| p.name == want) {
+        crate::runtime::set_active(p);
+    }
+    let bin = crate::runtime::binary();
+
+    let status = Command::new(&bin)
         .args(&mapped)
         .args(rest.iter().map(|s| s.as_str()))
         .stdin(Stdio::inherit())

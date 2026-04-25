@@ -18,6 +18,8 @@ pub struct Prefs {
     pub sort: HashMap<String, u8>,
     /// Whether to show stopped containers as well as running.
     pub show_all: Option<bool>,
+    /// Active runtime profile name (matches an entry in `profiles.toml`).
+    pub profile: Option<String>,
 }
 
 impl Prefs {

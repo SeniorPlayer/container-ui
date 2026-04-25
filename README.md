@@ -71,6 +71,9 @@ cgui tui        # same
 | **Mouse L**    | Click a tab title to switch tabs · click a row to select it |
 | **Mouse R**    | Right-click anywhere → **context menu** of actions for the current tab |
 | **Wheel**      | Scroll Logs · Inspect detail · Pull/Build stream   |
+| `X`            | Open the **runtime profile picker** (switch which CLI cgui shells out to) |
+| `Ctrl-R`       | (in Logs `/` search) toggle **regex** mode         |
+| `Ctrl-O`       | (in Build prompt) open the **file picker** for the build context |
 
 On the Logs tab `/` enters **search-as-you-type**: matches highlight in yellow as you type, with a live match counter in the title (`Logs · foo · search:err  (4 matches)`). Enter exits the input but keeps the highlight; `Esc` clears.
 
@@ -98,6 +101,29 @@ info    = "blue"      # image refs, links
 ```
 
 Accepts named colors (`red`, `darkgray`, `lightcyan`, …), `#RRGGBB`, and `rgb(r, g, b)` for truecolor terminals. Missing fields fall back to the built-in defaults; a malformed file is silently ignored.
+
+### Runtime profiles
+
+cgui can drive any Docker-compatible CLI, not just Apple's `container`. Drop a `profiles.toml` next to `state.json`:
+
+```toml
+# ~/.config/cgui/profiles.toml
+default = "container"
+
+[[profile]]
+name = "container"
+binary = "container"
+
+[[profile]]
+name = "docker"
+binary = "/usr/local/bin/docker"
+
+[[profile]]
+name = "podman"
+binary = "/opt/homebrew/bin/podman"
+```
+
+Press `X` in the TUI to open the picker, ↑↓ + Enter to activate. The choice is saved to `state.json` so `cgui ps`, `cgui images`, etc. (the Docker-compat shim) honor it on next launch too. The active runtime is shown in the top header (`cgui · runtime: docker`).
 
 In the Detail pane: `↑↓`/`PgUp`/`PgDn` scroll, `Esc` closes.
 In the Pull modal: `Esc` hides; pull keeps running in the background and the status bar reports completion.
@@ -161,12 +187,15 @@ State refresh is async and best-effort: if one source (e.g. `volume ls`) fails, 
 | Right-click context menu                              | ✅ shipped | 0.6.0          |
 | Configurable theme via `~/.config/cgui/theme.toml`    | ✅ shipped | 0.6.0          |
 | `b` image build with same streaming progress modal    | ✅ shipped | 0.6.0          |
+| Per-container CPU sparkline column                    | ✅ shipped | 0.7.0          |
+| Regex log search (`Ctrl-R` toggles in `/`)            | ✅ shipped | 0.7.0          |
+| Build context file picker (`Ctrl-O` from build prompt)| ✅ shipped | 0.7.0          |
+| Runtime profile switcher (`X`) + `profiles.toml`      | ✅ shipped | 0.7.0          |
 | Optional GUI front end (Tauri)                        | 🟡 planned | —              |
 
 ## Roadmap
 
 - Optional GUI front end (Tauri) sharing the same `container.rs` core
-- Build context picker (file dialog) instead of typed path
-- Multi-line log search with regex toggle
-- Resource graphs per-container (sparkline column)
-- `cgui ctx <name>` to switch active container runtime profile
+- Saved presets for `pull` (recent images) and `build` (recent contexts)
+- Per-container log streaming (follow mode) instead of one-shot fetch
+- Resource alerts: pulse the row when CPU/MEM crosses a configurable threshold

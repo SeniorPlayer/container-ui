@@ -2,7 +2,9 @@
 
 use crate::container::{self, Container, Image, Network, StatRow, Volume};
 use crate::prefs::Prefs;
+use crate::runtime::{self, Profile};
 use crate::theme::Theme;
+use std::path::PathBuf;
 use anyhow::Result;
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -68,6 +70,10 @@ pub enum Mode {
     Help,
     /// Right-click context menu near the click position.
     ContextMenu,
+    /// File picker for choosing a build context directory.
+    FilePicker,
+    /// Pick a runtime profile (which container CLI to shell out to).
+    ProfilePicker,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -215,6 +221,33 @@ pub struct App {
 
     /// Right-click context menu, when open.
     pub context_menu: Option<ContextMenu>,
+
+    /// Recent CPU% samples per container id, capped (~20 samples = ~40s of
+    /// history at the 2s refresh interval). Drives the sparkline column.
+    pub cpu_history_per_id: HashMap<String, VecDeque<f64>>,
+
+    /// Whether log search treats the query as a regex.
+    pub log_search_regex: bool,
+
+    /// File picker state.
+    pub picker: PickerState,
+
+    /// Loaded runtime profiles + active selection.
+    pub profiles: Vec<Profile>,
+    pub profile_picker_selected: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PickerState {
+    pub path: PathBuf,
+    pub entries: Vec<PickerEntry>,
+    pub selected: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct PickerEntry {
+    pub name: String,
+    pub is_dir: bool,
 }
 
 #[derive(Default, Clone, Debug)]
@@ -234,6 +267,23 @@ impl App {
         let show_all = prefs.show_all.unwrap_or(true);
         let sort_keys: HashMap<String, u8> = prefs.sort.clone();
         let sort_key = SortKey(sort_keys.get(tab.key()).copied().unwrap_or(0));
+
+        // Activate the saved profile (or profiles.toml's `default`) before any
+        // container.rs call goes out, so the very first refresh hits the
+        // intended runtime.
+        let profiles = runtime::load_profiles();
+        let want = prefs
+            .profile
+            .clone()
+            .or_else(runtime::default_name)
+            .unwrap_or_else(|| profiles[0].name.clone());
+        if let Some(p) = profiles.iter().find(|p| p.name == want) {
+            runtime::set_active(p);
+        }
+        let profile_picker_selected = profiles
+            .iter()
+            .position(|p| p.name == runtime::name())
+            .unwrap_or(0);
         Self {
             tab,
             show_all,
@@ -273,6 +323,54 @@ impl App {
             log_scroll: 0,
             op_scroll: 0,
             context_menu: None,
+            cpu_history_per_id: HashMap::new(),
+            log_search_regex: false,
+            picker: PickerState::default(),
+            profiles,
+            profile_picker_selected,
+        }
+    }
+
+    /// Push a directory listing into the picker.
+    pub fn picker_load(&mut self, path: PathBuf) {
+        let mut entries: Vec<PickerEntry> = vec![PickerEntry {
+            name: "..".into(),
+            is_dir: true,
+        }];
+        if let Ok(rd) = std::fs::read_dir(&path) {
+            let mut rest: Vec<PickerEntry> = rd
+                .flatten()
+                .filter_map(|de| {
+                    let name = de.file_name().to_string_lossy().into_owned();
+                    // Hide dotfiles to keep the picker readable.
+                    if name.starts_with('.') {
+                        return None;
+                    }
+                    let is_dir = de.file_type().ok().map(|t| t.is_dir()).unwrap_or(false);
+                    Some(PickerEntry { name, is_dir })
+                })
+                .collect();
+            rest.sort_by(|a, b| {
+                b.is_dir
+                    .cmp(&a.is_dir)
+                    .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            });
+            entries.extend(rest);
+        }
+        self.picker = PickerState {
+            path,
+            entries,
+            selected: 0,
+        };
+    }
+
+    /// Activate a runtime profile and persist it.
+    pub fn select_profile(&mut self, idx: usize) {
+        if let Some(p) = self.profiles.get(idx).cloned() {
+            runtime::set_active(&p);
+            self.prefs.profile = Some(p.name.clone());
+            self.save_prefs();
+            self.set_status(format!("runtime: {} ({})", p.name, p.binary));
         }
     }
 
@@ -281,6 +379,7 @@ impl App {
         self.prefs.tab = Some(self.tab.key().to_string());
         self.prefs.show_all = Some(self.show_all);
         self.prefs.sort = self.sort_keys.clone();
+        self.prefs.profile = Some(runtime::name());
         self.prefs.save();
     }
 
@@ -465,6 +564,18 @@ impl App {
             let total_cpu: f64 = v.iter().map(|s| s.cpu_percent).sum();
             let used: u64 = v.iter().map(|s| s.memory_usage).sum();
             let limit: u64 = v.iter().map(|s| s.memory_limit).sum();
+            // Per-id sparkline history.
+            for s in &v {
+                let key = if !s.id.is_empty() { &s.id } else { &s.name };
+                if key.is_empty() {
+                    continue;
+                }
+                let q = self
+                    .cpu_history_per_id
+                    .entry(key.clone())
+                    .or_insert_with(|| VecDeque::with_capacity(20));
+                push_capped(q, s.cpu_percent, 20);
+            }
             self.stats = v;
             push_capped(&mut self.cpu_history, total_cpu, 120);
             let mem_pct = if limit > 0 {
