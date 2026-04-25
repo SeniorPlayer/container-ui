@@ -2,7 +2,7 @@
 
 use crate::container::{self, Container, Image, Network, StatRow, Volume};
 use anyhow::Result;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -99,6 +99,11 @@ pub struct App {
     pub detail_scroll: u16,
     pub pull_log: Arc<Mutex<Vec<String>>>,
     pub pull_running: bool,
+
+    /// Container ids the user has multi-selected with Space. Batch verbs
+    /// operate on this set when non-empty (else fall back to the highlighted
+    /// row only).
+    pub marked: HashSet<String>,
 }
 
 impl App {
@@ -128,7 +133,42 @@ impl App {
             detail_scroll: 0,
             pull_log: Arc::new(Mutex::new(Vec::new())),
             pull_running: false,
+            marked: HashSet::new(),
         }
+    }
+
+    /// Toggle multi-select mark on the currently highlighted container.
+    pub fn toggle_mark_current_container(&mut self) {
+        if let Some(id) = self.current_container_id() {
+            if !self.marked.remove(&id) {
+                self.marked.insert(id);
+            }
+        }
+    }
+
+    /// Container ids to act on for a verb: the marked set if non-empty, else
+    /// just the currently highlighted row.
+    pub fn target_container_ids(&self) -> Vec<String> {
+        if !self.marked.is_empty() {
+            let mut v: Vec<String> = self.marked.iter().cloned().collect();
+            v.sort();
+            v
+        } else {
+            self.current_container_id().into_iter().collect()
+        }
+    }
+
+    /// Stats lookup keyed by container id/name. Used to overlay live CPU/MEM
+    /// onto the Containers table.
+    pub fn stats_by_id(&self) -> HashMap<String, (f64, u64, u64)> {
+        let mut m = HashMap::with_capacity(self.stats.len());
+        for s in &self.stats {
+            let key = if !s.id.is_empty() { &s.id } else { &s.name };
+            if !key.is_empty() {
+                m.insert(key.clone(), (s.cpu_percent, s.memory_usage, s.memory_limit));
+            }
+        }
+        m
     }
 
     pub fn next_tab(&mut self) {
@@ -280,7 +320,7 @@ impl App {
 }
 
 pub fn default_status() -> &'static str {
-    "q quit · ←→ tabs · ↑↓ select · Enter inspect · / filter · o sort · r refresh · a all · s/x/K/d/l/e · p pull"
+    "q quit · ←→ tabs · ↑↓ select · Space mark · Enter inspect · / filter · o sort · r refresh · a all · s/x/K/d/l/e · p pull"
 }
 
 fn sorted<F>(mut v: Vec<usize>, key: F) -> Vec<usize>

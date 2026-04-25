@@ -1,6 +1,7 @@
 mod app;
 mod cli;
 mod container;
+mod jsonhl;
 mod ui;
 
 use anyhow::Result;
@@ -238,10 +239,14 @@ async fn handle_key<B: ratatui::backend::Backend>(
             app.mode = Mode::PromptPull;
             app.set_status("Type image reference, Enter to pull");
         }
-        KeyCode::Char('s') if app.tab == Tab::Containers => action(app, "start").await,
-        KeyCode::Char('x') if app.tab == Tab::Containers => action(app, "stop").await,
-        KeyCode::Char('K') if app.tab == Tab::Containers => action(app, "kill").await,
-        KeyCode::Char('d') if app.tab == Tab::Containers => action(app, "delete").await,
+        KeyCode::Char(' ') if app.tab == Tab::Containers => {
+            app.toggle_mark_current_container();
+            app.move_down();
+        }
+        KeyCode::Char('s') if app.tab == Tab::Containers => batch_action(app, "start").await,
+        KeyCode::Char('x') if app.tab == Tab::Containers => batch_action(app, "stop").await,
+        KeyCode::Char('K') if app.tab == Tab::Containers => batch_action(app, "kill").await,
+        KeyCode::Char('d') if app.tab == Tab::Containers => batch_action(app, "delete").await,
         KeyCode::Char('l') if app.tab == Tab::Containers => load_logs(app).await,
         KeyCode::Char('e') if app.tab == Tab::Containers => exec_shell(term, app).await?,
         _ => {}
@@ -249,22 +254,49 @@ async fn handle_key<B: ratatui::backend::Backend>(
     Ok(())
 }
 
-async fn action(app: &mut App, verb: &str) {
-    let Some(id) = app.current_container_id() else {
+/// Run a lifecycle verb against either the marked set (if any) or the
+/// currently highlighted row. Aggregates ok/err per id into a one-line status.
+async fn batch_action(app: &mut App, verb: &str) {
+    let ids = app.target_container_ids();
+    if ids.is_empty() {
         app.set_status("No selection.");
         return;
-    };
-    app.set_status(format!("{verb} {id}…"));
-    let res = match verb {
-        "start" => container::start(&id).await,
-        "stop" => container::stop(&id).await,
-        "kill" => container::kill(&id).await,
-        "delete" => container::delete(&id).await,
-        _ => Ok(()),
-    };
-    match res {
-        Ok(()) => app.set_status(format!("{verb} {id}: ok")),
-        Err(e) => app.set_status(format!("{verb} {id}: {e}")),
+    }
+    let n = ids.len();
+    if n == 1 {
+        app.set_status(format!("{verb} {}…", ids[0]));
+    } else {
+        app.set_status(format!("{verb} ×{n}…"));
+    }
+
+    let mut ok = 0usize;
+    let mut errs: Vec<String> = Vec::new();
+    for id in &ids {
+        let r = match verb {
+            "start" => container::start(id).await,
+            "stop" => container::stop(id).await,
+            "kill" => container::kill(id).await,
+            "delete" => container::delete(id).await,
+            _ => Ok(()),
+        };
+        match r {
+            Ok(()) => ok += 1,
+            Err(e) => errs.push(format!("{id}: {e}")),
+        }
+    }
+
+    if errs.is_empty() {
+        app.set_status(format!("{verb} ok ({ok}/{n})"));
+    } else {
+        let first = errs.into_iter().next().unwrap_or_default();
+        app.set_status(format!("{verb} {ok}/{n} ok · err: {first}"));
+    }
+
+    // Drop marks for any ids that no longer exist (deleted) — safest to just
+    // clear them all on a successful batch verb so subsequent actions don't
+    // accidentally re-target.
+    if ok == n && matches!(verb, "delete") {
+        app.marked.clear();
     }
     app.refresh().await.ok();
 }

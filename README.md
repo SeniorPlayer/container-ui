@@ -52,18 +52,21 @@ cgui tui        # same
 | `Tab` / `→`    | Next tab                                        |
 | `Shift+Tab`/`←`| Prev tab                                        |
 | `↑` / `↓` / `j`| Move selection                                  |
-| `Enter`        | **Inspect** — open scrollable JSON detail pane  |
+| `Space`        | **Mark / unmark** the highlighted container for batch ops |
+| `Enter`        | **Inspect** — open syntax-highlighted JSON detail pane |
 | `/`            | **Filter** rows in current tab (Enter to apply) |
 | `o`            | Cycle **sort** key for current tab              |
 | `r`            | Refresh now                                     |
 | `a`            | Toggle show-all vs running-only                 |
-| `s`            | Start selected container                        |
-| `x`            | Stop selected container                         |
-| `K`            | Kill selected container (capital K)             |
-| `d`            | Delete selected container                       |
+| `s`            | Start (operates on marked set, else highlighted row) |
+| `x`            | Stop  (operates on marked set, else highlighted row) |
+| `K`            | Kill  (operates on marked set, else highlighted row) |
+| `d`            | Delete (operates on marked set, else highlighted row; clears marks on success) |
 | `l`            | Load logs for selected → Logs tab               |
 | `e`            | **Exec** — drop into `/bin/sh` in selected container (Ctrl-D returns to TUI) |
 | `p`            | **Pull** an image (Images tab) — opens prompt + live progress modal |
+
+The Containers table shows **live CPU% and MEM** (used / limit) per row when a stats sample is available, with traffic-light coloring. Marked rows display a yellow `●` in the leftmost column.
 
 In the Detail pane: `↑↓`/`PgUp`/`PgDn` scroll, `Esc` closes.
 In the Pull modal: `Esc` hides; pull keeps running in the background and the status bar reports completion.
@@ -101,13 +104,27 @@ Anything not in the table is passed through unchanged, so the shim never gets in
 
 State refresh is async and best-effort: if one source (e.g. `volume ls`) fails, the rest still update and the error surfaces in the status bar.
 
+## Progress
+
+| Feature                                              | Status     | Landed in       |
+| ---------------------------------------------------- | ---------- | --------------- |
+| Tabs · Containers/Images/Volumes/Networks/Logs       | ✅ shipped | 0.1.0           |
+| Aggregate CPU/MEM sparklines                         | ✅ shipped | 0.1.0           |
+| One-key lifecycle (start/stop/kill/delete/logs)      | ✅ shipped | 0.1.0           |
+| Docker-compat CLI shim (`ps`, `images`, `rmi`, …)    | ✅ shipped | 0.1.0           |
+| `e` exec shell-out (`/bin/sh` in selected container) | ✅ shipped | 0.2.0           |
+| `p` image pull with live streaming progress modal    | ✅ shipped | 0.2.0           |
+| `/` filter + `o` sort across all resource tabs       | ✅ shipped | 0.2.0           |
+| `Enter` inspect detail pane (`container inspect` JSON)| ✅ shipped | 0.2.0           |
+| Per-row live CPU/MEM in Containers table             | ✅ shipped | 0.3.0           |
+| `Space` multi-select + batch start/stop/kill/delete  | ✅ shipped | 0.3.0           |
+| Syntax-highlighted JSON in inspect pane              | ✅ shipped | 0.3.0           |
+| Optional GUI front end (Tauri)                       | 🟡 planned | —               |
+
 ## Roadmap
 
-- ~~`exec` shell-out (drop the user into a pty for the selected container)~~ ✅
-- ~~Image pull progress UI~~ ✅
-- ~~Sort/filter columns~~ ✅
-- ~~Detail pane on `Enter` (full `container inspect` JSON viewer)~~ ✅
 - Optional GUI front end (Tauri) sharing the same `container.rs` core
-- `inspect` syntax highlighting in the detail pane
-- Multi-select for batch start/stop/delete
-- `stats` per-row column overlay (live CPU/MEM in the Containers table)
+- `image pull` progress as a parsed % bar (currently raw stderr stream)
+- Search-as-you-type incremental highlighting in the Logs tab
+- Volumes detail: mount usage / contents (pending CLI support)
+- Re-attach to a long-running pull modal after pressing `Esc`

@@ -1,6 +1,7 @@
 //! Render the App. Pure ratatui — no I/O.
 
 use crate::app::{App, Mode, Tab};
+use crate::jsonhl;
 use humansize::{format_size, BINARY};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -137,9 +138,10 @@ fn block_title(app: &App, label: &str, total: usize, shown: usize) -> String {
 }
 
 fn draw_containers(f: &mut Frame, app: &mut App, area: Rect) {
-    let header = Row::new(vec!["ID", "IMAGE", "STATUS", "CPUS", "MEM", "PORTS"])
+    let header = Row::new(vec!["", "ID", "IMAGE", "STATUS", "CPU%", "MEM", "PORTS"])
         .style(header_style());
     let view = app.view_indices();
+    let stats = app.stats_by_id();
     let rows: Vec<Row> = view
         .iter()
         .map(|&i| {
@@ -149,25 +151,70 @@ fn draw_containers(f: &mut Frame, app: &mut App, area: Rect) {
                 "stopped" | "exited" => Style::default().fg(Color::Red),
                 _ => Style::default().fg(Color::Yellow),
             };
+            let mark = if app.marked.contains(&c.id) {
+                Cell::from("●").style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+            } else {
+                Cell::from(" ")
+            };
+
+            // Live stats overlay if available (running container with a stats sample),
+            // else fall back to the configured CPU count and memory limit.
+            let (cpu_cell, mem_cell) = match stats.get(&c.id) {
+                Some(&(cpu, used, limit)) => {
+                    let cpu_str = format!("{cpu:>5.1}%");
+                    let cpu_style = cpu_color(cpu);
+                    let mem_str = if limit > 0 {
+                        format!(
+                            "{} / {}",
+                            format_size(used, BINARY),
+                            format_size(limit, BINARY)
+                        )
+                    } else {
+                        format_size(used, BINARY)
+                    };
+                    let mem_pct = if limit > 0 {
+                        (used as f64 / limit as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+                    (
+                        Cell::from(cpu_str).style(cpu_style),
+                        Cell::from(mem_str).style(mem_color(mem_pct)),
+                    )
+                }
+                None => (
+                    Cell::from(format!("    {}", c.cpus))
+                        .style(Style::default().fg(Color::DarkGray)),
+                    Cell::from(format_size(c.memory_bytes, BINARY))
+                        .style(Style::default().fg(Color::DarkGray)),
+                ),
+            };
+
             Row::new(vec![
+                mark,
                 Cell::from(c.id.clone()),
                 Cell::from(c.image.clone()).style(Style::default().fg(Color::Blue)),
                 Cell::from(c.status.clone()).style(status_style),
-                Cell::from(c.cpus.to_string()),
-                Cell::from(format_size(c.memory_bytes, BINARY)),
+                cpu_cell,
+                mem_cell,
                 Cell::from(c.ports.join(", ")),
             ])
         })
         .collect();
     let widths = [
+        Constraint::Length(2),
         Constraint::Percentage(22),
-        Constraint::Percentage(36),
+        Constraint::Percentage(30),
         Constraint::Length(10),
-        Constraint::Length(5),
-        Constraint::Length(12),
+        Constraint::Length(7),
+        Constraint::Length(20),
         Constraint::Min(10),
     ];
-    let title = block_title(app, "Containers", app.containers.len(), rows.len());
+    let mark_count = app.marked.len();
+    let mut title = block_title(app, "Containers", app.containers.len(), rows.len());
+    if mark_count > 0 {
+        title = format!("{title}· marked:{mark_count} ");
+    }
     let table = Table::new(rows, widths)
         .header(header)
         .block(Block::default().borders(Borders::ALL).title(title))
@@ -180,6 +227,27 @@ fn draw_containers(f: &mut Frame, app: &mut App, area: Rect) {
     let mut state = TableState::default();
     state.select(Some(app.selected));
     f.render_stateful_widget(table, area, &mut state);
+}
+
+fn cpu_color(pct: f64) -> Style {
+    if pct >= 80.0 {
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    } else if pct >= 40.0 {
+        Style::default().fg(Color::Yellow)
+    } else if pct > 0.0 {
+        Style::default().fg(Color::Green)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    }
+}
+fn mem_color(pct: f64) -> Style {
+    if pct >= 90.0 {
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    } else if pct >= 70.0 {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::Magenta)
+    }
 }
 
 fn draw_images(f: &mut Frame, app: &mut App, area: Rect) {
@@ -348,8 +416,8 @@ fn draw_detail_overlay(f: &mut Frame, app: &App, area: Rect) {
     let r = centered(area, 80, 80);
     f.render_widget(Clear, r);
     let title = " Inspect (↑↓/PgUp/PgDn scroll · Esc close) ";
-    let p = Paragraph::new(app.detail.clone())
-        .wrap(Wrap { trim: false })
+    let lines = jsonhl::highlight(&app.detail);
+    let p = Paragraph::new(lines)
         .scroll((app.detail_scroll, 0))
         .block(
             Block::default()
