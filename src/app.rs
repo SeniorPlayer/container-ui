@@ -281,6 +281,10 @@ pub struct App {
     pub trivy_scroll: u16,
     /// Severity filter for the trivy results table; None shows all.
     pub trivy_filter: Option<crate::trivy::Severity>,
+    /// Substring search across CVE id / package / title.
+    pub trivy_search: String,
+    /// True while the user is typing into the trivy search bar.
+    pub trivy_search_active: bool,
     /// Captured trivy JSON body (filled by spawn_trivy on completion).
     pub trivy_json: Arc<Mutex<String>>,
 
@@ -401,6 +405,8 @@ impl App {
             trivy_report: None,
             trivy_scroll: 0,
             trivy_filter: None,
+            trivy_search: String::new(),
+            trivy_search_active: false,
             trivy_json: Arc::new(Mutex::new(String::new())),
             health: HashMap::new(),
         }

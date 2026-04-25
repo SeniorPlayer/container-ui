@@ -574,9 +574,41 @@ async fn handle_key<B: ratatui::backend::Backend>(
         }
         Mode::TrivyResult => {
             use crate::trivy::Severity;
+            // Search input mode: characters go into the buffer; nav keys exit.
+            if app.trivy_search_active {
+                match code {
+                    KeyCode::Esc => {
+                        app.trivy_search.clear();
+                        app.trivy_search_active = false;
+                        app.trivy_scroll = 0;
+                    }
+                    KeyCode::Enter => {
+                        app.trivy_search_active = false;
+                    }
+                    KeyCode::Backspace => {
+                        app.trivy_search.pop();
+                        app.trivy_scroll = 0;
+                    }
+                    KeyCode::Char(c) => {
+                        app.trivy_search.push(c);
+                        app.trivy_scroll = 0;
+                    }
+                    _ => {}
+                }
+                return Ok(());
+            }
             match code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
-                    app.mode = Mode::Browse;
+                    if !app.trivy_search.is_empty() && code == KeyCode::Esc {
+                        app.trivy_search.clear();
+                        app.trivy_scroll = 0;
+                    } else {
+                        app.mode = Mode::Browse;
+                    }
+                }
+                KeyCode::Char('/') => {
+                    app.trivy_search_active = true;
+                    app.trivy_scroll = 0;
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     app.trivy_scroll = app.trivy_scroll.saturating_add(1);
@@ -925,6 +957,7 @@ async fn handle_key<B: ratatui::backend::Backend>(
         KeyCode::Char('u') if app.tab == Tab::Stacks => start_stack(app, pull_handle, true).await,
         KeyCode::Char('D') if app.tab == Tab::Stacks => start_stack(app, pull_handle, false).await,
         KeyCode::Char('l') if app.tab == Tab::Stacks => stack_logs(app, log_handle).await,
+        KeyCode::Char('L') if app.tab == Tab::Stacks => stack_logs_multi(app, log_handle).await,
         KeyCode::Char('n') if app.tab == Tab::Stacks => {
             app.prompt_buf.clear();
             app.mode = Mode::PromptStackName;
@@ -1067,6 +1100,46 @@ fn start_follow(
     app.log_following = true;
     *log_handle = Some(container::spawn_log_follow(id.clone(), app.logs_buf.clone()));
     app.set_status(format!("following {id} (F to stop)"));
+}
+
+fn start_follow_multi(
+    app: &mut App,
+    log_handle: &mut Option<tokio::task::JoinHandle<Result<()>>>,
+    label: String,
+    targets: Vec<(String, String)>,
+) {
+    if let Some(h) = log_handle.take() {
+        h.abort();
+    }
+    if let Ok(mut v) = app.logs_buf.lock() {
+        v.clear();
+    }
+    app.log_target = Some(label.clone());
+    app.log_scroll = 0;
+    app.log_following = true;
+    *log_handle = Some(container::spawn_logs_multi(targets, app.logs_buf.clone()));
+    app.set_status(format!("multi-following {label} (F on Logs to stop)"));
+}
+
+async fn stack_logs_multi(
+    app: &mut App,
+    log_handle: &mut Option<tokio::task::JoinHandle<Result<()>>>,
+) {
+    let Some(stack) = app.current_stack() else {
+        app.set_status("No stack selected.");
+        return;
+    };
+    if stack.services.is_empty() {
+        app.set_status("Stack has no services.");
+        return;
+    }
+    let targets: Vec<(String, String)> = stack
+        .services
+        .iter()
+        .map(|svc| (svc.name.clone(), stacks::container_name(&stack.name, &svc.name)))
+        .collect();
+    start_follow_multi(app, log_handle, format!("stack:{}", stack.name), targets);
+    app.set_tab(Tab::Logs);
 }
 
 async fn open_detail(app: &mut App) {
@@ -1244,6 +1317,9 @@ async fn start_trivy(
     if let Ok(mut v) = app.pull_log.lock() { v.clear(); }
     if let Ok(mut s) = app.trivy_json.lock() { s.clear(); }
     app.trivy_report = None;
+    app.trivy_filter = None;
+    app.trivy_search.clear();
+    app.trivy_search_active = false;
     app.pull_running = true;
     app.op_kind = OperationKind::Trivy;
     app.pull_reference = Some(image.clone());

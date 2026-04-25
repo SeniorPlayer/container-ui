@@ -61,16 +61,23 @@ pub struct Service {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Healthcheck {
-    /// `"tcp"` (default) or `"cmd"`. cmd runs `container exec <name> <command…>`.
+    /// `"tcp"` (default), `"http"`, or `"cmd"`.
+    /// * `tcp` opens a TCP connection to the resolved port.
+    /// * `http` issues `GET` over plain HTTP/1.0; success = status in
+    ///   `expect_status` (default 200..399).
+    /// * `cmd` runs `container exec <name> <command…>`; success = exit 0.
     #[serde(default = "default_kind")]
     pub kind: String,
-    /// For tcp: a port number (matched against the hostPort in the published
-    /// ports list, or the bare container port if not published). For cmd: an
-    /// argv list.
+    /// For tcp/http: a port number, or `PORT/PATH`, or a full
+    /// `http://host:port/path` URL. For cmd: ignored.
     #[serde(default)]
     pub target: Option<String>,
+    /// For cmd: argv passed to `container exec`.
     #[serde(default)]
     pub command: Vec<String>,
+    /// HTTP only: status range. `[200, 299]` or `[201]` etc. Default 200-399.
+    #[serde(default)]
+    pub expect_status: Vec<u16>,
     /// Seconds between checks. Default 30.
     #[serde(default = "default_interval")]
     pub interval_s: u64,

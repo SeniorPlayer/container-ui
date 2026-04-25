@@ -1060,6 +1060,7 @@ fn draw_help_overlay(f: &mut Frame, app: &App, area: Rect) {
             lines.push(h("D", "Down — stop+delete every service container"));
             lines.push(h("Enter", "Detail: source + services + restart + health"));
             lines.push(h("l", "Logs of the stack's first service"));
+            lines.push(h("L", "Multi-follow logs from EVERY service (prefixed)"));
             lines.push(h("n", "New stack (template + open in $EDITOR)"));
             lines.push(h("E", "Edit selected stack in $EDITOR"));
             lines.push(h("auto", "Stack files reload on disk change (FSEvents)"));
@@ -1322,22 +1323,34 @@ fn draw_trivy_result(f: &mut Frame, app: &App, area: Rect) {
         None => "all".to_string(),
         Some(s) => s.label().to_lowercase(),
     };
+    let search_label = if app.trivy_search.is_empty() {
+        "—".to_string()
+    } else {
+        app.trivy_search.clone()
+    };
+    let title = format!(
+        " Trivy · {} · sev:{filter_label} · search:{search_label} · 1-4 0 / Esc ",
+        report.artifact
+    );
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.accent))
         .title(Span::styled(
-            format!(
-                " Trivy · {} · filter:{filter_label} · 1-4 filter · 0 clear · Esc close ",
-                report.artifact
-            ),
+            title,
             Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(r);
     f.render_widget(block, r);
 
+    // Top stripe (counts), optional search input row, then the table.
+    let constraints: Vec<Constraint> = if app.trivy_search_active {
+        vec![Constraint::Length(3), Constraint::Length(1), Constraint::Min(1)]
+    } else {
+        vec![Constraint::Length(3), Constraint::Min(1)]
+    };
     let split = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .constraints(constraints)
         .split(inner);
 
     // Severity counts row. Active filter chip gets a bright underline.
@@ -1363,23 +1376,49 @@ fn draw_trivy_result(f: &mut Frame, app: &App, area: Rect) {
     );
     f.render_widget(header, split[0]);
 
+    // Optional search input row.
+    let table_idx = if app.trivy_search_active {
+        let bar = Paragraph::new(Line::from(vec![
+            Span::styled(" /", Style::default().fg(app.theme.warning)),
+            Span::raw(&app.trivy_search),
+            Span::styled("█", Style::default().fg(app.theme.warning)),
+            Span::styled(
+                "   (Enter keep · Esc clear · Backspace)",
+                Style::default().fg(app.theme.muted),
+            ),
+        ]));
+        f.render_widget(bar, split[1]);
+        2
+    } else {
+        1
+    };
+
     // Findings table.
     if report.findings.is_empty() {
         let body = Paragraph::new(Line::from(Span::styled(
             "no HIGH or CRITICAL findings ✓",
             Style::default().fg(app.theme.success).add_modifier(Modifier::BOLD),
         )));
-        f.render_widget(body, split[1]);
+        f.render_widget(body, split[table_idx]);
         return;
     }
     let header_row = Row::new(vec!["SEV", "CVE", "PKG", "INSTALLED", "FIXED", "TITLE"])
         .style(header_style());
+    let needle = app.trivy_search.to_lowercase();
     let rows: Vec<Row> = report
         .findings
         .iter()
         .filter(|f| match app.trivy_filter {
             Some(s) => f.severity == s,
             None => true,
+        })
+        .filter(|f| {
+            if needle.is_empty() {
+                return true;
+            }
+            f.id.to_lowercase().contains(&needle)
+                || f.pkg.to_lowercase().contains(&needle)
+                || f.title.to_lowercase().contains(&needle)
         })
         .map(|fnd| {
             let (fg, _) = severity_colors(app, fnd.severity);
@@ -1406,7 +1445,7 @@ fn draw_trivy_result(f: &mut Frame, app: &App, area: Rect) {
         Constraint::Min(10),
     ];
     let table = Table::new(rows, widths).header(header_row);
-    f.render_widget(table, split[1]);
+    f.render_widget(table, split[table_idx]);
 }
 
 fn severity_colors(app: &App, s: Severity) -> (Color, Color) {

@@ -303,6 +303,83 @@ pub fn spawn_log_follow(
     })
 }
 
+/// Multi-container follow. Spawns one `container logs -f <id>` per target,
+/// tags every line with `[label] `, and merges them into the shared sink.
+/// Aborting the returned handle drops the children — `kill_on_drop(true)`
+/// ensures their `container` processes get SIGKILLed too.
+pub fn spawn_logs_multi(
+    targets: Vec<(String, String)>, // (label, container id)
+    sink: Arc<Mutex<Vec<String>>>,
+) -> tokio::task::JoinHandle<Result<()>> {
+    tokio::spawn(async move {
+        if targets.is_empty() {
+            push(&sink, "[multi] no services to follow".into());
+            return Ok(());
+        }
+        push(
+            &sink,
+            format!(
+                "$ container logs -f (multi: {})",
+                targets
+                    .iter()
+                    .map(|(l, _)| l.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        );
+        let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(targets.len());
+        for (label, id) in targets {
+            let s = sink.clone();
+            handles.push(tokio::spawn(async move {
+                let spawn = Command::new(bin())
+                    .args(["logs", "-f", &id])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .kill_on_drop(true)
+                    .spawn();
+                let mut child = match spawn {
+                    Ok(c) => c,
+                    Err(e) => {
+                        push(&s, format!("[{label}] spawn error: {e}"));
+                        return;
+                    }
+                };
+                let stdout = child.stdout.take();
+                let stderr = child.stderr.take();
+                let s_out = s.clone();
+                let s_err = s.clone();
+                let l_out = label.clone();
+                let l_err = label.clone();
+                let t_out = tokio::spawn(async move {
+                    if let Some(out) = stdout {
+                        let mut lines = BufReader::new(out).lines();
+                        while let Ok(Some(line)) = lines.next_line().await {
+                            push(&s_out, format!("[{l_out}] {line}"));
+                        }
+                    }
+                });
+                let t_err = tokio::spawn(async move {
+                    if let Some(err) = stderr {
+                        let mut lines = BufReader::new(err).lines();
+                        while let Ok(Some(line)) = lines.next_line().await {
+                            push(&s_err, format!("[{l_err}] {line}"));
+                        }
+                    }
+                });
+                let _ = child.wait().await;
+                let _ = t_out.await;
+                let _ = t_err.await;
+                push(&s, format!("[{label}] follow ended"));
+            }));
+        }
+        for h in handles {
+            let _ = h.await;
+        }
+        push(&sink, "[multi] all follows ended".into());
+        Ok(())
+    })
+}
+
 pub async fn logs(id: &str, tail: usize) -> Result<String> {
     // `container logs` doesn't take --tail in all versions; pull then trim.
     let out = Command::new(bin()).args(["logs", id]).output().await?;

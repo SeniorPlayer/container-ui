@@ -80,6 +80,8 @@ cgui tui        # same
 | `u` / `D`      | (Stacks) **Up** / **Down** the selected stack       |
 | `n` / `E`      | (Stacks) **New** stack (template + `$EDITOR`) · **Edit** selected stack |
 | `1`-`4` / `0`  | (Trivy modal) filter by severity (CRITICAL/HIGH/MEDIUM/LOW) · clear |
+| `/`            | (Trivy modal) **search bar** across CVE id / package / title |
+| `L`            | (Stacks) **multi-follow** logs from every service (prefixed) |
 
 On the Logs tab `/` enters **search-as-you-type**: matches highlight in yellow as you type, with a live match counter in the title (`Logs · foo · search:err  (4 matches)`). Enter exits the input but keeps the highlight; `Esc` clears.
 
@@ -192,11 +194,19 @@ ports = ["15432:5432"]
 restart = "always"          # "always" | "on-failure" | "no" (default)
 
 [service.healthcheck]
-kind = "tcp"                # "tcp" or "cmd"
-target = "15432"            # for tcp: host port; for cmd: ignored
+kind = "tcp"                # "tcp", "http", or "cmd"
+target = "15432"            # tcp: host port · http: PORT/PATH or full URL
 interval_s = 30             # default 30
 # command = ["pg_isready", "-U", "postgres"]   # for kind = "cmd"
+# expect_status = [200, 299]                    # http only; default 200..399
 ```
+
+For `kind = "http"` the `target` accepts:
+- a bare port (`"8080"`) — probes `http://127.0.0.1:8080/`
+- `PORT/PATH` (`"8080/healthz"`) — probes `http://127.0.0.1:8080/healthz`
+- a full URL (`"http://example.com:8080/v1/ping"`) — used verbatim
+
+Probes use a tiny built-in HTTP/1.0 client (no extra deps, no TLS); success is any status in `expect_status[0]..=expect_status[1]`, defaulting to `200..399`.
 
 A background loop (every ~10 s) checks each service's container state. If the policy is `always`, any stopped/exited container is restarted; `on-failure` only restarts on a non-zero exit. The `HEALTH` and `RESTART` columns on the Stacks tab show the rolled-up state per stack:
 
@@ -236,7 +246,7 @@ If [trivy](https://github.com/aquasecurity/trivy) is on `$PATH`, press `T` on an
 
 If parsing fails (older trivy schema or malformed output) the raw stream stays visible — no data is lost.
 
-In the results modal: press `1`/`c` for CRITICAL, `2`/`h` for HIGH, `3`/`m` for MEDIUM, `4`/`l` for LOW, or `0` to clear the filter. The active severity gets an underline on its count chip.
+In the results modal: press `1`/`c` for CRITICAL, `2`/`h` for HIGH, `3`/`m` for MEDIUM, `4`/`l` for LOW, or `0` to clear the filter. The active severity gets an underline on its count chip. Press `/` to enter the **CVE / package / title search bar**: substring filter applied on top of the severity filter, case-insensitive across the CVE id, package name, and title fields. Enter exits the input keeping the filter; Esc clears it.
 
 ### Importing docker-compose.yml
 
@@ -335,14 +345,18 @@ State refresh is async and best-effort: if one source (e.g. `volume ls`) fails, 
 | Trivy filter-by-severity (1-4 / c/h/m/l, 0 clears)    | ✅ shipped | 0.11.0         |
 | FSEvents-driven stack-file live reload                | ✅ shipped | 0.11.0         |
 | MIT LICENSE                                           | ✅ shipped | 0.11.0         |
+| Decoupled refresh + 8s timeouts on CLI calls          | ✅ shipped | 0.11.1         |
+| HTTP healthcheck kind                                 | ✅ shipped | 0.12.0         |
+| Per-service log multiplex (`L` on Stacks)             | ✅ shipped | 0.12.0         |
+| Trivy CVE search bar (`/` in results modal)           | ✅ shipped | 0.12.0         |
 | Optional GUI front end (Tauri)                        | 🟡 planned | —              |
 
 ## Roadmap
 
 - Optional GUI front end (Tauri) sharing the same `container.rs` core
-- HTTP healthcheck kind (currently tcp + cmd)
-- Per-service log multiplex on the Stacks tab
-- Trivy CVE search bar (in addition to severity filter)
+- HTTPS healthcheck (currently plain HTTP only)
+- Live diff view between stack file on disk and running containers
+- Stack templates / presets (`cgui new myapp --template postgres+api`)
 
 ## License
 

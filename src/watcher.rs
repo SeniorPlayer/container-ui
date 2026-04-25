@@ -144,6 +144,7 @@ async fn run_start(name: &str) -> std::io::Result<std::process::Output> {
 async fn probe(stack: &Stack, svc: &Service, hc: &Healthcheck) -> (bool, String) {
     match hc.kind.as_str() {
         "cmd" => probe_cmd(stack, svc, hc).await,
+        "http" => probe_http(svc, hc).await,
         _ => probe_tcp(svc, hc).await,
     }
 }
@@ -177,6 +178,135 @@ async fn probe_tcp(svc: &Service, hc: &Healthcheck) -> (bool, String) {
         Ok(Ok(_)) => (true, format!("tcp {addr} ok")),
         Ok(Err(e)) => (false, format!("tcp {addr}: {e}")),
         Err(_) => (false, format!("tcp {addr}: timeout")),
+    }
+}
+
+/// HTTP healthcheck. `target` accepts:
+///   * `"PORT"`            → http://127.0.0.1:PORT/
+///   * `"PORT/PATH"`       → http://127.0.0.1:PORT/PATH
+///   * `"http://host:port/path"` → used verbatim (https not supported here)
+///
+/// Success = response status is in `expect_status[0]..=expect_status[1]`,
+/// or 200..399 if not specified. We talk minimal HTTP/1.0 against a
+/// `tokio::net::TcpStream`, no TLS, no extra dependency.
+async fn probe_http(svc: &Service, hc: &Healthcheck) -> (bool, String) {
+    let raw = match hc.target.as_deref() {
+        Some(t) if !t.is_empty() => t.to_string(),
+        _ => match svc.ports.first() {
+            Some(p) => p.split(':').next().unwrap_or("").to_string(),
+            None => return (false, "no http target and no published port".into()),
+        },
+    };
+    let (host, port, path) = parse_http_target(&raw);
+    let addr = format!("{host}:{port}");
+    let timeout = Duration::from_secs(2);
+    let connect = tokio::net::TcpStream::connect(&addr);
+    let stream = match tokio::time::timeout(timeout, connect).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => return (false, format!("http {addr}{path}: {e}")),
+        Err(_) => return (false, format!("http {addr}{path}: connect timeout")),
+    };
+    let req = format!(
+        "GET {path} HTTP/1.0\r\nHost: {host}\r\nUser-Agent: cgui\r\nConnection: close\r\n\r\n"
+    );
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = stream;
+    if let Err(e) = stream.write_all(req.as_bytes()).await {
+        return (false, format!("http {addr}{path}: write {e}"));
+    }
+    let mut buf = Vec::with_capacity(1024);
+    // We only need the first line; cap the read to avoid pulling a huge body.
+    let read = tokio::time::timeout(timeout, async {
+        let mut tmp = [0u8; 256];
+        loop {
+            match stream.read(&mut tmp).await {
+                Ok(0) => break Ok::<_, std::io::Error>(()),
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.len() > 512 || buf.iter().any(|b| *b == b'\n') {
+                        break Ok(());
+                    }
+                }
+                Err(e) => break Err(e),
+            }
+        }
+    })
+    .await;
+    match read {
+        Err(_) => return (false, format!("http {addr}{path}: read timeout")),
+        Ok(Err(e)) => return (false, format!("http {addr}{path}: read {e}")),
+        Ok(Ok(())) => {}
+    }
+    let head = String::from_utf8_lossy(&buf);
+    let first = head.lines().next().unwrap_or("");
+    let status: Option<u16> = first.split_whitespace().nth(1).and_then(|s| s.parse().ok());
+    let (lo, hi) = expected_range(hc);
+    match status {
+        Some(c) if c >= lo && c <= hi => (true, format!("http {addr}{path} → {c}")),
+        Some(c) => (false, format!("http {addr}{path} → {c} (expected {lo}-{hi})")),
+        None => (false, format!("http {addr}{path}: malformed response: {first}")),
+    }
+}
+
+fn parse_http_target(t: &str) -> (String, u16, String) {
+    if let Some(rest) = t.strip_prefix("http://") {
+        let (auth, path) = match rest.find('/') {
+            Some(i) => (&rest[..i], &rest[i..]),
+            None => (rest, "/"),
+        };
+        let (host, port) = match auth.rsplit_once(':') {
+            Some((h, p)) => (h.to_string(), p.parse().unwrap_or(80)),
+            None => (auth.to_string(), 80),
+        };
+        return (host, port, path.to_string());
+    }
+    // PORT or PORT/PATH form.
+    let (port_str, path) = match t.find('/') {
+        Some(i) => (&t[..i], &t[i..]),
+        None => (t, "/"),
+    };
+    let port: u16 = port_str.parse().unwrap_or(80);
+    ("127.0.0.1".to_string(), port, path.to_string())
+}
+
+fn expected_range(hc: &Healthcheck) -> (u16, u16) {
+    match hc.expect_status.as_slice() {
+        [a, b] => (*a, *b),
+        [a] => (*a, *a),
+        _ => (200, 399),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_target_port_only() {
+        assert_eq!(parse_http_target("8080"), ("127.0.0.1".into(), 8080, "/".into()));
+    }
+    #[test]
+    fn parse_target_port_path() {
+        assert_eq!(parse_http_target("8080/healthz"), ("127.0.0.1".into(), 8080, "/healthz".into()));
+    }
+    #[test]
+    fn parse_target_full_url() {
+        assert_eq!(
+            parse_http_target("http://example.com:8080/v1/ping"),
+            ("example.com".into(), 8080, "/v1/ping".into())
+        );
+    }
+    #[test]
+    fn parse_target_url_no_path() {
+        assert_eq!(
+            parse_http_target("http://localhost:80"),
+            ("localhost".into(), 80, "/".into())
+        );
+    }
+    #[test]
+    fn expected_default_range() {
+        let hc = crate::stacks::Healthcheck::default();
+        assert_eq!(expected_range(&hc), (200, 399));
     }
 }
 
