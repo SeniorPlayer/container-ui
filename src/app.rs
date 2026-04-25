@@ -5,7 +5,6 @@ use crate::prefs::Prefs;
 use crate::runtime::{self, Profile};
 use crate::theme::Theme;
 use std::path::PathBuf;
-use anyhow::Result;
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -699,25 +698,25 @@ impl App {
         self.status = default_status().into();
     }
 
-    pub async fn refresh(&mut self) -> Result<()> {
-        match container::list_containers(self.show_all).await {
-            Ok(v) => self.containers = v,
-            Err(e) => self.set_status(format!("ls error: {e}")),
+    /// Apply a `RefreshResult` produced by `fetch_all()`. Pure; safe to call
+    /// from anywhere on the event loop.
+    pub fn apply_refresh(&mut self, r: RefreshResult) {
+        if let Some(v) = r.containers {
+            self.containers = v;
         }
-        if let Ok(v) = container::list_images().await {
+        if let Some(v) = r.images {
             self.images = v;
         }
-        if let Ok(v) = container::list_volumes().await {
+        if let Some(v) = r.volumes {
             self.volumes = v;
         }
-        if let Ok(v) = container::list_networks().await {
+        if let Some(v) = r.networks {
             self.networks = v;
         }
-        if let Ok(v) = container::stats_snapshot().await {
+        if let Some(v) = r.stats {
             let total_cpu: f64 = v.iter().map(|s| s.cpu_percent).sum();
             let used: u64 = v.iter().map(|s| s.memory_usage).sum();
             let limit: u64 = v.iter().map(|s| s.memory_limit).sum();
-            // Per-id sparkline history.
             for s in &v {
                 let key = if !s.id.is_empty() { &s.id } else { &s.name };
                 if key.is_empty() {
@@ -738,6 +737,9 @@ impl App {
             };
             push_capped(&mut self.mem_history, mem_pct, 120);
         }
+        if let Some(e) = r.error {
+            self.set_status(e);
+        }
         let n = self.row_count();
         if n == 0 {
             self.selected = 0;
@@ -745,8 +747,43 @@ impl App {
             self.selected = n - 1;
         }
         self.last_refresh = Instant::now();
-        Ok(())
     }
+}
+
+/// Snapshot of every CLI list call. Pure data — no `&mut App` involved, so
+/// the fetch can run as a detached tokio task and the event loop never
+/// blocks waiting on the runtime CLI.
+#[derive(Default, Debug, Clone)]
+pub struct RefreshResult {
+    pub containers: Option<Vec<container::Container>>,
+    pub images: Option<Vec<container::Image>>,
+    pub volumes: Option<Vec<container::Volume>>,
+    pub networks: Option<Vec<container::Network>>,
+    pub stats: Option<Vec<container::StatRow>>,
+    pub error: Option<String>,
+}
+
+/// Run every list call in parallel and collect the results. Errors on any
+/// one call are recorded into `error` (last writer wins) but never abort
+/// the others — partial results are better than none.
+pub async fn fetch_all(show_all: bool) -> RefreshResult {
+    let (c, i, v, n, s) = tokio::join!(
+        container::list_containers(show_all),
+        container::list_images(),
+        container::list_volumes(),
+        container::list_networks(),
+        container::stats_snapshot(),
+    );
+    let mut out = RefreshResult::default();
+    match c {
+        Ok(v) => out.containers = Some(v),
+        Err(e) => out.error = Some(format!("ls: {e}")),
+    }
+    out.images = i.ok();
+    out.volumes = v.ok();
+    out.networks = n.ok();
+    out.stats = s.ok();
+    out
 }
 
 pub fn default_status() -> &'static str {

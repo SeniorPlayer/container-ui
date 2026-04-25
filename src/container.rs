@@ -62,12 +62,29 @@ pub struct StatRow {
     pub memory_limit: u64,
 }
 
+/// Default timeout for one-shot CLI calls. Stats can legitimately take ~2s
+/// even with `--no-stream` (the runtime waits a sample window), so the
+/// timeout has to be generous.
+const RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
 async fn run(args: &[&str]) -> Result<Vec<u8>> {
-    let out = Command::new(bin())
-        .args(args)
-        .output()
-        .await
-        .with_context(|| format!("failed to spawn `{} {}`", bin(), args.join(" ")))?;
+    let fut = Command::new(bin()).args(args).output();
+    let out = match tokio::time::timeout(RUN_TIMEOUT, fut).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            return Err(anyhow!(e)).with_context(|| {
+                format!("failed to spawn `{} {}`", bin(), args.join(" "))
+            });
+        }
+        Err(_) => {
+            return Err(anyhow!(
+                "`{} {}` timed out after {}s",
+                bin(),
+                args.join(" "),
+                RUN_TIMEOUT.as_secs()
+            ));
+        }
+    };
     if !out.status.success() {
         return Err(anyhow!(
             "`{} {}` exited {}: {}",

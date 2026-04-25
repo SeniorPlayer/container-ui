@@ -65,7 +65,9 @@ fn leave_terminal() -> Result<()> {
 
 async fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>) -> Result<()> {
     let mut app = App::new();
-    app.refresh().await.ok();
+    // First refresh runs inline so the UI has data before the first draw.
+    let initial = app::fetch_all(app.show_all).await;
+    app.apply_refresh(initial);
 
     let mut events = EventStream::new();
     let mut tick = interval(Duration::from_millis(2000));
@@ -75,6 +77,7 @@ async fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>) -> Res
 
     let mut pull_handle: Option<tokio::task::JoinHandle<Result<()>>> = None;
     let mut log_handle: Option<tokio::task::JoinHandle<Result<()>>> = None;
+    let mut refresh_handle: Option<tokio::task::JoinHandle<app::RefreshResult>> = None;
 
     // Background watchers: filesystem events + restart/healthcheck loop.
     let (watch_tx, mut watch_rx) =
@@ -83,6 +86,15 @@ async fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>) -> Res
     let _bg_handle = watcher::spawn_restart_health(watch_tx.clone());
 
     while app.running {
+        // Reap a finished refresh task — apply its result to App.
+        if let Some(h) = refresh_handle.as_ref() {
+            if h.is_finished() {
+                let h = refresh_handle.take().unwrap();
+                if let Ok(r) = h.await {
+                    app.apply_refresh(r);
+                }
+            }
+        }
         // Reap a finished follow task and clear the running flag.
         if let Some(h) = log_handle.as_ref() {
             if h.is_finished() {
@@ -118,7 +130,7 @@ async fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>) -> Res
                 if matches!(app.op_kind, OperationKind::StackUp | OperationKind::StackDown) {
                     app.reload_stacks();
                 }
-                app.refresh().await.ok();
+                refresh_now(&mut app).await;
             }
         }
 
@@ -126,8 +138,13 @@ async fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>) -> Res
 
         tokio::select! {
             _ = tick.tick() => {
-                if matches!(app.mode, Mode::Browse | Mode::Filter | Mode::PullProgress | Mode::Detail) {
-                    app.refresh().await.ok();
+                // Spawn refresh as a background task — never block the
+                // event loop on a slow `container stats` (the runtime can
+                // take ~2s per call when a container is running).
+                if refresh_handle.is_none()
+                    && matches!(app.mode, Mode::Browse | Mode::Filter | Mode::PullProgress | Mode::Detail)
+                {
+                    refresh_handle = Some(tokio::spawn(app::fetch_all(app.show_all)));
                 }
             }
             _ = redraw.tick() => { /* re-render only */ }
@@ -151,8 +168,19 @@ async fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>) -> Res
     if let Some(h) = log_handle.take() {
         h.abort();
     }
+    if let Some(h) = refresh_handle.take() {
+        h.abort();
+    }
     app.save_prefs();
     Ok(())
+}
+
+/// Run a refresh inline (still bounded by container::run's 8s timeout) and
+/// apply the result. Used by key handlers that want fresh data immediately
+/// after an action — start/stop/etc. — without waiting for the next tick.
+async fn refresh_now(app: &mut App) {
+    let r = app::fetch_all(app.show_all).await;
+    app.apply_refresh(r);
 }
 
 async fn handle_mouse(app: &mut App, m: MouseEvent) {
@@ -350,13 +378,13 @@ async fn invoke_context_action(app: &mut App, action: ContextAction) {
         ContextAction::StackDown => app.set_status("stack down: press D on the row"),
         ContextAction::Refresh => {
             app.set_status("Refreshing…");
-            app.refresh().await.ok();
+            refresh_now(app).await;
             app.set_status("Refreshed.");
         }
         ContextAction::ToggleAll => {
             app.show_all = !app.show_all;
             app.save_prefs();
-            app.refresh().await.ok();
+            refresh_now(app).await;
         }
         ContextAction::Help => app.mode = Mode::Help,
     }
@@ -796,7 +824,7 @@ async fn handle_key<B: ratatui::backend::Backend>(
                     let idx = app.profile_picker_selected;
                     app.select_profile(idx);
                     app.mode = Mode::Browse;
-                    app.refresh().await.ok();
+                    refresh_now(app).await;
                 }
                 _ => {}
             }
@@ -829,7 +857,7 @@ async fn handle_key<B: ratatui::backend::Backend>(
             if app.tab == Tab::Stacks {
                 app.reload_stacks();
             }
-            app.refresh().await.ok();
+            refresh_now(app).await;
             app.set_status("Refreshed.");
         }
         KeyCode::Char('a') => {
@@ -840,7 +868,7 @@ async fn handle_key<B: ratatui::backend::Backend>(
                 "Showing running only"
             });
             app.save_prefs();
-            app.refresh().await.ok();
+            refresh_now(app).await;
         }
         KeyCode::Char('?') => {
             app.mode = Mode::Help;
@@ -974,7 +1002,7 @@ async fn batch_action(app: &mut App, verb: &str) {
     if ok == n && matches!(verb, "delete") {
         app.marked.clear();
     }
-    app.refresh().await.ok();
+    refresh_now(app).await;
 }
 
 async fn load_logs(
@@ -1301,6 +1329,6 @@ async fn exec_shell<B: ratatui::backend::Backend>(
         Ok(s) => app.set_status(format!("exec {id}: exited {s}")),
         Err(e) => app.set_status(format!("exec {id}: spawn error: {e}")),
     }
-    app.refresh().await.ok();
+    refresh_now(app).await;
     Ok(())
 }
