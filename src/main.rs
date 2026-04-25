@@ -395,18 +395,19 @@ fn hit(r: ratatui::layout::Rect, x: u16, y: u16) -> bool {
 }
 
 /// Map an x coordinate inside the tab bar to a Tab. ratatui's `Tabs` widget
-/// renders titles separated by " │ " (length 3) inside a 1-col bordered box,
-/// each title padded by 1 space on each side. We replicate that math here.
+/// renders each title as " label " (1-space padding on each side) and uses
+/// a single-character divider "│" between them. The visible gap of " │ "
+/// is just two padding spaces flanking the divider — not three separator
+/// columns — so each tab advances `label_len + 2 + 1`.
 fn tab_from_x(tabs_rect: ratatui::layout::Rect, x: u16) -> Option<app::Tab> {
     let inside = x.checked_sub(tabs_rect.x.saturating_add(1))?; // skip border
-    // Each rendered tab takes: " label "  (len + 2). Separator " │ " (3).
     let mut cursor: u16 = 0;
     for (i, t) in app::Tab::ALL.iter().enumerate() {
-        let label_len = t.label().chars().count() as u16 + 2;
+        let label_len = t.label().chars().count() as u16 + 2; // " label "
         if inside >= cursor && inside < cursor + label_len {
             return Some(app::Tab::ALL[i]);
         }
-        cursor = cursor + label_len + 3;
+        cursor += label_len + 1; // single-char divider
     }
     None
 }
