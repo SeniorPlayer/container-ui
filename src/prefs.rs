@@ -20,6 +20,40 @@ pub struct Prefs {
     pub show_all: Option<bool>,
     /// Active runtime profile name (matches an entry in `profiles.toml`).
     pub profile: Option<String>,
+    /// Recently-pulled image references, newest first, capped.
+    #[serde(default)]
+    pub recent_pulls: Vec<String>,
+    /// Recently-built (context, tag) pairs, newest first, capped.
+    #[serde(default)]
+    pub recent_builds: Vec<RecentBuild>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct RecentBuild {
+    pub path: String,
+    pub tag: Option<String>,
+}
+
+const RECENT_CAP: usize = 10;
+
+impl Prefs {
+    pub fn push_recent_pull(&mut self, reference: &str) {
+        self.recent_pulls.retain(|r| r != reference);
+        self.recent_pulls.insert(0, reference.to_string());
+        self.recent_pulls.truncate(RECENT_CAP);
+    }
+    pub fn push_recent_build(&mut self, path: &str, tag: Option<&str>) {
+        self.recent_builds
+            .retain(|b| b.path != path || b.tag.as_deref() != tag);
+        self.recent_builds.insert(
+            0,
+            RecentBuild {
+                path: path.to_string(),
+                tag: tag.map(|t| t.to_string()),
+            },
+        );
+        self.recent_builds.truncate(RECENT_CAP);
+    }
 }
 
 impl Prefs {

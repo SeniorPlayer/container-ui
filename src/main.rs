@@ -69,8 +69,17 @@ async fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>) -> Res
     redraw.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let mut pull_handle: Option<tokio::task::JoinHandle<Result<()>>> = None;
+    let mut log_handle: Option<tokio::task::JoinHandle<Result<()>>> = None;
 
     while app.running {
+        // Reap a finished follow task and clear the running flag.
+        if let Some(h) = log_handle.as_ref() {
+            if h.is_finished() {
+                let h = log_handle.take().unwrap();
+                let _ = h.await;
+                app.log_following = false;
+            }
+        }
         // Reap finished pull task.
         if let Some(h) = pull_handle.as_ref() {
             if h.is_finished() {
@@ -99,13 +108,16 @@ async fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>) -> Res
                 match ev {
                     Some(Ok(Event::Key(k))) => {
                         if k.kind != crossterm::event::KeyEventKind::Press { continue; }
-                        handle_key(term, &mut app, &mut pull_handle, k.code, k.modifiers).await?;
+                        handle_key(term, &mut app, &mut pull_handle, &mut log_handle, k.code, k.modifiers).await?;
                     }
                     Some(Ok(Event::Mouse(m))) => handle_mouse(&mut app, m).await,
                     _ => {}
                 }
             }
         }
+    }
+    if let Some(h) = log_handle.take() {
+        h.abort();
     }
     app.save_prefs();
     Ok(())
@@ -274,7 +286,15 @@ fn context_menu_rect(app: &App) -> Option<ratatui::layout::Rect> {
 async fn invoke_context_action(app: &mut App, action: ContextAction) {
     match action {
         ContextAction::Inspect => open_detail(app).await,
-        ContextAction::Logs => load_logs(app).await,
+        ContextAction::Logs => {
+            // Context-menu Logs is one-shot; for follow, the user can press F.
+            // We don't have a log_handle here, so do an unconditional fetch
+            // that the next event-loop iteration will see when it pumps the
+            // logs_buf — safe because no follow can be running at this point
+            // unless they started one then opened the menu (rare).
+            let mut none: Option<tokio::task::JoinHandle<Result<()>>> = None;
+            load_logs(app, &mut none).await;
+        }
         ContextAction::Start => batch_action(app, "start").await,
         ContextAction::Stop => batch_action(app, "stop").await,
         ContextAction::Kill => batch_action(app, "kill").await,
@@ -324,6 +344,7 @@ async fn handle_key<B: ratatui::backend::Backend>(
     term: &mut Terminal<B>,
     app: &mut App,
     pull_handle: &mut Option<tokio::task::JoinHandle<Result<()>>>,
+    log_handle: &mut Option<tokio::task::JoinHandle<Result<()>>>,
     code: KeyCode,
     mods: KeyModifiers,
 ) -> Result<()> {
@@ -357,11 +378,21 @@ async fn handle_key<B: ratatui::backend::Backend>(
             match code {
                 KeyCode::Esc => {
                     app.prompt_buf.clear();
+                    app.recent_idx = None;
                     app.mode = Mode::Browse;
                     app.reset_status();
                 }
+                KeyCode::Up => {
+                    app.cycle_recent_pull(1);
+                    return Ok(());
+                }
+                KeyCode::Down => {
+                    app.cycle_recent_pull(-1);
+                    return Ok(());
+                }
                 KeyCode::Enter => {
                     let reference = std::mem::take(&mut app.prompt_buf);
+                    app.recent_idx = None;
                     if reference.trim().is_empty() {
                         app.mode = Mode::Browse;
                         app.set_status("pull cancelled (empty reference)");
@@ -374,15 +405,19 @@ async fn handle_key<B: ratatui::backend::Backend>(
                     app.op_kind = OperationKind::Pull;
                     app.pull_reference = Some(reference.clone());
                     app.op_scroll = 0;
+                    app.prefs.push_recent_pull(reference.trim());
+                    app.save_prefs();
                     *pull_handle = Some(container::spawn_pull(reference.clone(), app.pull_log.clone()));
                     app.mode = Mode::PullProgress;
                     app.set_status(format!("pulling {reference}…"));
                 }
                 KeyCode::Backspace => {
                     app.prompt_buf.pop();
+                    app.recent_idx = None;
                 }
                 KeyCode::Char(c) => {
                     app.prompt_buf.push(c);
+                    app.recent_idx = None;
                 }
                 _ => {}
             }
@@ -485,8 +520,17 @@ async fn handle_key<B: ratatui::backend::Backend>(
                     app.set_status("file picker · ↑↓ · Enter descend · . pick · Esc cancel");
                 }
                 KeyCode::Tab => app.build_field = if app.build_field == 0 { 1 } else { 0 },
+                KeyCode::Up => {
+                    app.cycle_recent_build(1);
+                    return Ok(());
+                }
+                KeyCode::Down => {
+                    app.cycle_recent_build(-1);
+                    return Ok(());
+                }
                 KeyCode::Enter => {
                     let path = app.build_path.trim().to_string();
+                    app.recent_idx = None;
                     if path.is_empty() {
                         app.set_status("build cancelled (empty context path)");
                         app.mode = Mode::Browse;
@@ -504,6 +548,8 @@ async fn handle_key<B: ratatui::backend::Backend>(
                     app.op_kind = OperationKind::Build;
                     app.pull_reference = Some(tag.clone().unwrap_or_else(|| path.clone()));
                     app.op_scroll = 0;
+                    app.prefs.push_recent_build(&path, tag.as_deref());
+                    app.save_prefs();
                     *pull_handle = Some(container::spawn_build(path.clone(), tag, app.pull_log.clone()));
                     app.mode = Mode::PullProgress;
                     app.set_status(format!("building {path}…"));
@@ -514,6 +560,7 @@ async fn handle_key<B: ratatui::backend::Backend>(
                     } else {
                         app.build_tag.pop();
                     }
+                    app.recent_idx = None;
                 }
                 KeyCode::Char(c) => {
                     if app.build_field == 0 {
@@ -521,6 +568,7 @@ async fn handle_key<B: ratatui::backend::Backend>(
                     } else {
                         app.build_tag.push(c);
                     }
+                    app.recent_idx = None;
                 }
                 _ => {}
             }
@@ -724,7 +772,20 @@ async fn handle_key<B: ratatui::backend::Backend>(
         KeyCode::Char('x') if app.tab == Tab::Containers => batch_action(app, "stop").await,
         KeyCode::Char('K') if app.tab == Tab::Containers => batch_action(app, "kill").await,
         KeyCode::Char('d') if app.tab == Tab::Containers => batch_action(app, "delete").await,
-        KeyCode::Char('l') if app.tab == Tab::Containers => load_logs(app).await,
+        KeyCode::Char('l') if app.tab == Tab::Containers => load_logs(app, log_handle).await,
+        KeyCode::Char('F') if app.tab == Tab::Containers => follow_logs(app, log_handle).await,
+        KeyCode::Char('F') if app.tab == Tab::Logs => {
+            // Toggle: if already following, stop; else start on log_target.
+            if app.log_following {
+                if let Some(h) = log_handle.take() { h.abort(); }
+                app.log_following = false;
+                app.set_status("follow stopped");
+            } else if let Some(id) = app.log_target.clone() {
+                start_follow(app, log_handle, id);
+            } else {
+                app.set_status("no container selected for follow");
+            }
+        }
         KeyCode::Char('e') if app.tab == Tab::Containers => exec_shell(term, app).await?,
         _ => {}
     }
@@ -778,14 +839,29 @@ async fn batch_action(app: &mut App, verb: &str) {
     app.refresh().await.ok();
 }
 
-async fn load_logs(app: &mut App) {
+async fn load_logs(
+    app: &mut App,
+    log_handle: &mut Option<tokio::task::JoinHandle<Result<()>>>,
+) {
     let Some(id) = app.current_container_id() else {
         app.set_status("No selection.");
         return;
     };
+    // One-shot fetch supersedes any in-flight follow.
+    if let Some(h) = log_handle.take() {
+        h.abort();
+    }
+    app.log_following = false;
     app.set_status(format!("loading logs for {id}…"));
     match container::logs(&id, 500).await {
         Ok(s) => {
+            // Push the fetched lines into logs_buf for the unified renderer.
+            if let Ok(mut v) = app.logs_buf.lock() {
+                v.clear();
+                for line in s.lines() {
+                    v.push(line.to_string());
+                }
+            }
             app.logs = s;
             app.log_target = Some(id);
             app.log_scroll = 0;
@@ -794,6 +870,36 @@ async fn load_logs(app: &mut App) {
         }
         Err(e) => app.set_status(format!("logs error: {e}")),
     }
+}
+
+async fn follow_logs(
+    app: &mut App,
+    log_handle: &mut Option<tokio::task::JoinHandle<Result<()>>>,
+) {
+    let Some(id) = app.current_container_id() else {
+        app.set_status("No selection.");
+        return;
+    };
+    start_follow(app, log_handle, id);
+    app.set_tab(Tab::Logs);
+}
+
+fn start_follow(
+    app: &mut App,
+    log_handle: &mut Option<tokio::task::JoinHandle<Result<()>>>,
+    id: String,
+) {
+    if let Some(h) = log_handle.take() {
+        h.abort();
+    }
+    if let Ok(mut v) = app.logs_buf.lock() {
+        v.clear();
+    }
+    app.log_target = Some(id.clone());
+    app.log_scroll = 0;
+    app.log_following = true;
+    *log_handle = Some(container::spawn_log_follow(id.clone(), app.logs_buf.clone()));
+    app.set_status(format!("following {id} (F to stop)"));
 }
 
 async fn open_detail(app: &mut App) {

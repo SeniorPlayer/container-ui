@@ -239,6 +239,53 @@ pub async fn stats_snapshot() -> Result<Vec<StatRow>> {
         .collect())
 }
 
+/// Spawn `container logs -f <id>` and stream both stdout and stderr,
+/// line-by-line, into the shared sink. Mirrors `spawn_pull` so the modal/
+/// log infrastructure can stay shared.
+///
+/// The returned JoinHandle's `.abort()` kills the streaming task; ratatui's
+/// process will exit when the shell does on its own (Ctrl-C from us would
+/// require a more involved process-group setup).
+pub fn spawn_log_follow(
+    id: String,
+    sink: Arc<Mutex<Vec<String>>>,
+) -> tokio::task::JoinHandle<Result<()>> {
+    tokio::spawn(async move {
+        push(&sink, format!("$ container logs -f {id}"));
+        let mut child = Command::new(bin())
+            .args(["logs", "-f", &id])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("spawn logs -f {id}"))?;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let s1 = sink.clone();
+        let s2 = sink.clone();
+        let t_out = tokio::spawn(async move {
+            if let Some(out) = stdout {
+                let mut lines = BufReader::new(out).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    push(&s1, line);
+                }
+            }
+        });
+        let t_err = tokio::spawn(async move {
+            if let Some(err) = stderr {
+                let mut lines = BufReader::new(err).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    push(&s2, line);
+                }
+            }
+        });
+        let _ = child.wait().await;
+        let _ = t_out.await;
+        let _ = t_err.await;
+        push(&sink, "[follow ended]".into());
+        Ok(())
+    })
+}
+
 pub async fn logs(id: &str, tail: usize) -> Result<String> {
     // `container logs` doesn't take --tail in all versions; pull then trim.
     let out = Command::new(bin()).args(["logs", id]).output().await?;

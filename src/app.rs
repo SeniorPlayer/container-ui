@@ -235,6 +235,20 @@ pub struct App {
     /// Loaded runtime profiles + active selection.
     pub profiles: Vec<Profile>,
     pub profile_picker_selected: usize,
+
+    /// Streaming log buffer used by both one-shot fetch and `logs -f` follow.
+    pub logs_buf: Arc<Mutex<Vec<String>>>,
+    /// Whether a follow stream is currently active.
+    pub log_following: bool,
+
+    /// Recent-preset navigation state for the pull/build prompts. None means
+    /// the user is editing freely; Some(i) means they're scrolling through
+    /// recents and `typed_*` holds whatever they had typed before they
+    /// started navigating.
+    pub recent_idx: Option<usize>,
+    pub typed_pull: String,
+    pub typed_build_path: String,
+    pub typed_build_tag: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -328,6 +342,12 @@ impl App {
             picker: PickerState::default(),
             profiles,
             profile_picker_selected,
+            logs_buf: Arc::new(Mutex::new(Vec::new())),
+            log_following: false,
+            recent_idx: None,
+            typed_pull: String::new(),
+            typed_build_path: String::new(),
+            typed_build_tag: String::new(),
         }
     }
 
@@ -362,6 +382,67 @@ impl App {
             entries,
             selected: 0,
         };
+    }
+
+    /// True/false flips ~once per 500 ms; used by ui to pulse alerting rows.
+    pub fn pulse_phase(&self) -> bool {
+        (self.last_refresh.elapsed().as_millis() / 500) % 2 == 0
+    }
+
+    /// Cycle pull-prompt history. `dir = +1` = older, `-1` = newer.
+    pub fn cycle_recent_pull(&mut self, dir: i32) {
+        let recents = self.prefs.recent_pulls.clone();
+        if recents.is_empty() {
+            return;
+        }
+        match (self.recent_idx, dir) {
+            (None, d) if d > 0 => {
+                self.typed_pull = self.prompt_buf.clone();
+                self.recent_idx = Some(0);
+                self.prompt_buf = recents[0].clone();
+            }
+            (Some(0), d) if d < 0 => {
+                self.recent_idx = None;
+                self.prompt_buf = std::mem::take(&mut self.typed_pull);
+            }
+            (Some(i), d) => {
+                let n = recents.len();
+                let new_i = (i as i32 + d).clamp(0, n as i32 - 1) as usize;
+                self.recent_idx = Some(new_i);
+                self.prompt_buf = recents[new_i].clone();
+            }
+            _ => {}
+        }
+    }
+
+    /// Cycle build-prompt history. Replaces both fields together.
+    pub fn cycle_recent_build(&mut self, dir: i32) {
+        let recents = self.prefs.recent_builds.clone();
+        if recents.is_empty() {
+            return;
+        }
+        match (self.recent_idx, dir) {
+            (None, d) if d > 0 => {
+                self.typed_build_path = self.build_path.clone();
+                self.typed_build_tag = self.build_tag.clone();
+                self.recent_idx = Some(0);
+                self.build_path = recents[0].path.clone();
+                self.build_tag = recents[0].tag.clone().unwrap_or_default();
+            }
+            (Some(0), d) if d < 0 => {
+                self.recent_idx = None;
+                self.build_path = std::mem::take(&mut self.typed_build_path);
+                self.build_tag = std::mem::take(&mut self.typed_build_tag);
+            }
+            (Some(i), d) => {
+                let n = recents.len();
+                let new_i = (i as i32 + d).clamp(0, n as i32 - 1) as usize;
+                self.recent_idx = Some(new_i);
+                self.build_path = recents[new_i].path.clone();
+                self.build_tag = recents[new_i].tag.clone().unwrap_or_default();
+            }
+            _ => {}
+        }
     }
 
     /// Activate a runtime profile and persist it.

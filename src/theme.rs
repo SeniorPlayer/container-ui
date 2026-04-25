@@ -39,6 +39,58 @@ pub struct Theme {
     pub key: Color,
     pub string: Color,
     pub number: Color,
+    pub alerts: Alerts,
+}
+
+/// Resource-alert thresholds + appearance. Pulse alternates the row's
+/// background once per ~500 ms when an alert is active.
+#[derive(Debug, Clone)]
+pub struct Alerts {
+    pub cpu_warn: f64,
+    pub cpu_alert: f64,
+    pub mem_warn: f64,
+    pub mem_alert: f64,
+    pub pulse: bool,
+}
+
+impl Default for Alerts {
+    fn default() -> Self {
+        Self {
+            cpu_warn: 60.0,
+            cpu_alert: 85.0,
+            mem_warn: 70.0,
+            mem_alert: 90.0,
+            pulse: true,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum AlertLevel {
+    None,
+    Warn,
+    Alert,
+}
+
+impl Alerts {
+    pub fn cpu_level(&self, pct: f64) -> AlertLevel {
+        if pct >= self.cpu_alert {
+            AlertLevel::Alert
+        } else if pct >= self.cpu_warn {
+            AlertLevel::Warn
+        } else {
+            AlertLevel::None
+        }
+    }
+    pub fn mem_level(&self, pct: f64) -> AlertLevel {
+        if pct >= self.mem_alert {
+            AlertLevel::Alert
+        } else if pct >= self.mem_warn {
+            AlertLevel::Warn
+        } else {
+            AlertLevel::None
+        }
+    }
 }
 
 impl Default for Theme {
@@ -54,6 +106,7 @@ impl Default for Theme {
             key: Color::Cyan,
             string: Color::Green,
             number: Color::Magenta,
+            alerts: Alerts::default(),
         }
     }
 }
@@ -70,6 +123,16 @@ struct Raw {
     key: Option<String>,
     string: Option<String>,
     number: Option<String>,
+    alerts: Option<RawAlerts>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawAlerts {
+    cpu_warn: Option<f64>,
+    cpu_alert: Option<f64>,
+    mem_warn: Option<f64>,
+    mem_alert: Option<f64>,
+    pulse: Option<bool>,
 }
 
 impl Theme {
@@ -88,6 +151,13 @@ impl Theme {
         if let Some(c) = raw.key.as_deref().and_then(parse_color) { t.key = c; }
         if let Some(c) = raw.string.as_deref().and_then(parse_color) { t.string = c; }
         if let Some(c) = raw.number.as_deref().and_then(parse_color) { t.number = c; }
+        if let Some(a) = raw.alerts {
+            if let Some(v) = a.cpu_warn { t.alerts.cpu_warn = v; }
+            if let Some(v) = a.cpu_alert { t.alerts.cpu_alert = v; }
+            if let Some(v) = a.mem_warn { t.alerts.mem_warn = v; }
+            if let Some(v) = a.mem_alert { t.alerts.mem_alert = v; }
+            if let Some(v) = a.pulse { t.alerts.pulse = v; }
+        }
         t
     }
 }

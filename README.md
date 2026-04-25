@@ -74,6 +74,8 @@ cgui tui        # same
 | `X`            | Open the **runtime profile picker** (switch which CLI cgui shells out to) |
 | `Ctrl-R`       | (in Logs `/` search) toggle **regex** mode         |
 | `Ctrl-O`       | (in Build prompt) open the **file picker** for the build context |
+| `F`            | (Containers) start **follow-mode log streaming** · (Logs) toggle stop/start |
+| `↑` / `↓`      | (in Pull/Build prompts) cycle through **recent presets** |
 
 On the Logs tab `/` enters **search-as-you-type**: matches highlight in yellow as you type, with a live match counter in the title (`Logs · foo · search:err  (4 matches)`). Enter exits the input but keeps the highlight; `Esc` clears.
 
@@ -124,6 +126,29 @@ binary = "/opt/homebrew/bin/podman"
 ```
 
 Press `X` in the TUI to open the picker, ↑↓ + Enter to activate. The choice is saved to `state.json` so `cgui ps`, `cgui images`, etc. (the Docker-compat shim) honor it on next launch too. The active runtime is shown in the top header (`cgui · runtime: docker`).
+
+### Resource alerts
+
+The `[alerts]` section of `theme.toml` configures per-row CPU/MEM thresholds:
+
+```toml
+[alerts]
+cpu_warn  = 60.0   # tint the row when CPU% exceeds this (steady)
+cpu_alert = 85.0   # pulse when CPU% exceeds this
+mem_warn  = 70.0
+mem_alert = 90.0
+pulse     = true   # set to false for steady highlight at alert level
+```
+
+The Containers row's background is steady-tinted at `warn` and pulses at `alert` (alternating once per ~500 ms). Defaults are 60/85/70/90 with pulse on.
+
+### Recent presets
+
+The pull and build prompts remember your last 10 invocations. `↑` cycles into the history (saving whatever you'd typed), `↓` cycles back; the prompt footer shows your position (e.g. `↑↓ recent (2/7)`). Storage is in the same `state.json` next to the rest of your prefs.
+
+### Follow-mode logs
+
+Press `F` on a Containers row to start a `container logs -f` stream into the Logs tab; press `F` again on the Logs tab to stop. The header colors green and shows `● follow` while live; auto-tails when scroll is at the top, otherwise pins to your scroll position. Combined with `/` + `Ctrl-R`, you get live regex log monitoring.
 
 In the Detail pane: `↑↓`/`PgUp`/`PgDn` scroll, `Esc` closes.
 In the Pull modal: `Esc` hides; pull keeps running in the background and the status bar reports completion.
@@ -191,11 +216,15 @@ State refresh is async and best-effort: if one source (e.g. `volume ls`) fails, 
 | Regex log search (`Ctrl-R` toggles in `/`)            | ✅ shipped | 0.7.0          |
 | Build context file picker (`Ctrl-O` from build prompt)| ✅ shipped | 0.7.0          |
 | Runtime profile switcher (`X`) + `profiles.toml`      | ✅ shipped | 0.7.0          |
+| Recent pull/build presets (↑↓ in prompts)             | ✅ shipped | 0.8.0          |
+| Follow-mode log streaming (`F`) with auto-tail        | ✅ shipped | 0.8.0          |
+| Configurable resource alerts (`[alerts]` in theme)    | ✅ shipped | 0.8.0          |
 | Optional GUI front end (Tauri)                        | 🟡 planned | —              |
 
 ## Roadmap
 
 - Optional GUI front end (Tauri) sharing the same `container.rs` core
-- Saved presets for `pull` (recent images) and `build` (recent contexts)
-- Per-container log streaming (follow mode) instead of one-shot fetch
-- Resource alerts: pulse the row when CPU/MEM crosses a configurable threshold
+- Compose-style multi-container session management
+- `cgui doctor` — diagnose common runtime/CLI issues
+- Image vulnerability scan integration (e.g. trivy)
+- Network detail pane with interface stats and route table

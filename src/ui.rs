@@ -3,6 +3,7 @@
 use crate::app::{App, Mode, Tab};
 use crate::jsonhl;
 use crate::pullprog;
+use crate::theme::AlertLevel;
 use humansize::{format_size, BINARY};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -218,7 +219,22 @@ fn draw_containers(f: &mut Frame, app: &mut App, area: Rect) {
             let trend = sparkline_str(trend_history.map(|h| h.iter().copied()).into_iter().flatten(), 16);
             let trend_cell = Cell::from(trend).style(Style::default().fg(app.theme.success));
 
-            Row::new(vec![
+            // Alert level: max of CPU and MEM alert levels for the live sample.
+            let (cpu_lvl, mem_lvl) = match stats.get(&c.id) {
+                Some(&(cpu, used, limit)) => {
+                    let mem_pct = if limit > 0 { (used as f64 / limit as f64) * 100.0 } else { 0.0 };
+                    (app.theme.alerts.cpu_level(cpu), app.theme.alerts.mem_level(mem_pct))
+                }
+                None => (AlertLevel::None, AlertLevel::None),
+            };
+            let row_lvl = match (cpu_lvl, mem_lvl) {
+                (AlertLevel::Alert, _) | (_, AlertLevel::Alert) => AlertLevel::Alert,
+                (AlertLevel::Warn, _) | (_, AlertLevel::Warn) => AlertLevel::Warn,
+                _ => AlertLevel::None,
+            };
+            let row_style = alert_row_style(app, row_lvl);
+
+            let mut row = Row::new(vec![
                 mark,
                 Cell::from(c.id.clone()),
                 Cell::from(c.image.clone()).style(Style::default().fg(Color::Blue)),
@@ -227,7 +243,11 @@ fn draw_containers(f: &mut Frame, app: &mut App, area: Rect) {
                 trend_cell,
                 mem_cell,
                 Cell::from(c.ports.join(", ")),
-            ])
+            ]);
+            if let Some(s) = row_style {
+                row = row.style(s);
+            }
+            row
         })
         .collect();
     let widths = [
@@ -257,6 +277,38 @@ fn draw_containers(f: &mut Frame, app: &mut App, area: Rect) {
     let mut state = TableState::default();
     state.select(Some(app.selected));
     f.render_stateful_widget(table, area, &mut state);
+}
+
+/// Background style for an alerting row. Alert pulses (only on alert, not
+/// warn) when `theme.alerts.pulse` is true; warn rows get a steady tint.
+fn alert_row_style(app: &App, level: AlertLevel) -> Option<Style> {
+    match level {
+        AlertLevel::None => None,
+        AlertLevel::Warn => Some(Style::default().bg(dim_bg(app.theme.warning))),
+        AlertLevel::Alert => {
+            let lit = !app.theme.alerts.pulse || app.pulse_phase();
+            if lit {
+                Some(
+                    Style::default()
+                        .bg(dim_bg(app.theme.danger))
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Some(Style::default().bg(dim_bg(app.theme.warning)))
+            }
+        }
+    }
+}
+
+/// Convert a foreground accent into a row-background tint. Truecolor
+/// variants are dimmed to ~25% to keep text readable; named colors fall
+/// back to themselves (terminal-specific).
+fn dim_bg(c: Color) -> Color {
+    match c {
+        Color::Rgb(r, g, b) => Color::Rgb(r / 4, g / 4, b / 4),
+        other => other,
+    }
 }
 
 /// Render a sequence of CPU% samples as a unicode bar chart, right-aligned to
@@ -404,6 +456,10 @@ fn draw_networks(f: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
     let mode_tag = if app.log_search_regex { "regex" } else { "text" };
+    let buf_text: String = match app.logs_buf.lock() {
+        Ok(v) => v.join("\n"),
+        Err(_) => String::new(),
+    };
     let compiled_re = if app.log_search_regex && !app.log_search.is_empty() {
         regex::RegexBuilder::new(&app.log_search)
             .case_insensitive(true)
@@ -413,42 +469,64 @@ fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
         None
     };
     let match_count = if let Some(re) = &compiled_re {
-        count_regex_matches(&app.logs, re)
+        count_regex_matches(&buf_text, re)
     } else if !app.log_search.is_empty() {
-        count_matches(&app.logs, &app.log_search)
+        count_matches(&buf_text, &app.log_search)
     } else {
         0
     };
+    let stream_tag = if app.log_following { "● follow" } else { "static" };
     let title = match (&app.log_target, app.log_search.is_empty()) {
-        (Some(id), true) => format!(" Logs · {id} (/ search · ^R regex · l reload · wheel scrolls) "),
+        (Some(id), true) => format!(
+            " Logs · {id} · {stream_tag} (/ search · ^R regex · l reload · F follow · wheel scrolls) "
+        ),
         (Some(id), false) => {
             let bad = compiled_re.is_none() && app.log_search_regex;
             if bad {
-                format!(" Logs · {id} · {mode_tag}:{}  (regex error) ", app.log_search)
+                format!(" Logs · {id} · {stream_tag} · {mode_tag}:{}  (regex error) ", app.log_search)
             } else {
-                format!(" Logs · {id} · {mode_tag}:{}  ({} matches) ", app.log_search, match_count)
+                format!(
+                    " Logs · {id} · {stream_tag} · {mode_tag}:{}  ({} matches) ",
+                    app.log_search, match_count
+                )
             }
         }
-        (None, _) => " Logs (select a container, press l) ".to_string(),
+        (None, _) => " Logs (select a container, press l for one-shot or F to follow) ".to_string(),
     };
 
-    let lines: Vec<Line> = if app.logs.is_empty() {
+    // Auto-tail when following and the user hasn't scrolled.
+    let inner_h = area.height.saturating_sub(2) as usize;
+    let visible_text = if app.log_following && app.log_scroll == 0 && inner_h > 0 {
+        let lines: Vec<&str> = buf_text.lines().collect();
+        let start = lines.len().saturating_sub(inner_h);
+        lines[start..].join("\n")
+    } else {
+        buf_text
+    };
+
+    let lines: Vec<Line> = if visible_text.is_empty() {
         vec![Line::from("No logs loaded.")]
     } else if app.log_search.is_empty() {
-        app.logs.lines().map(|l| Line::from(l.to_string())).collect()
+        visible_text.lines().map(|l| Line::from(l.to_string())).collect()
     } else if let Some(re) = &compiled_re {
-        app.logs.lines().map(|l| highlight_regex(l, re)).collect()
+        visible_text.lines().map(|l| highlight_regex(l, re)).collect()
     } else {
-        app.logs
+        visible_text
             .lines()
             .map(|l| highlight_search(l, &app.log_search))
             .collect()
     };
 
+    let title_color = if app.log_following { app.theme.success } else { app.theme.muted };
     let p = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .scroll((app.log_scroll, 0))
-        .block(Block::default().borders(Borders::ALL).title(title));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(title_color))
+                .title(title),
+        );
     f.render_widget(p, area);
 }
 
@@ -737,29 +815,39 @@ fn draw_detail_overlay(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_prompt_overlay(f: &mut Frame, app: &App, area: Rect) {
-    let r = centered(area, 60, 20);
+    let r = centered(area, 60, 25);
     f.render_widget(Clear, r);
+    let recents_n = app.prefs.recent_pulls.len();
+    let recents_hint = if recents_n > 0 {
+        let pos = match app.recent_idx {
+            Some(i) => format!("{}/{recents_n}", i + 1),
+            None => "—".into(),
+        };
+        format!("↑↓ recent ({pos})")
+    } else {
+        "(no recent pulls)".into()
+    };
     let body = Paragraph::new(vec![
         Line::from(Span::styled(
             "Image reference to pull:",
-            Style::default().fg(Color::White),
+            Style::default().fg(app.theme.primary),
         )),
         Line::from(""),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled(&app.prompt_buf, Style::default().fg(Color::Yellow)),
-            Span::styled("█", Style::default().fg(Color::Yellow)),
+            Span::styled(&app.prompt_buf, Style::default().fg(app.theme.warning)),
+            Span::styled("█", Style::default().fg(app.theme.warning)),
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "Enter pull · Esc cancel",
-            Style::default().fg(Color::DarkGray),
+            format!("Enter pull · Esc cancel · {recents_hint}"),
+            Style::default().fg(app.theme.muted),
         )),
     ])
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
+            .border_style(Style::default().fg(app.theme.accent))
             .title(" Pull image "),
     );
     f.render_widget(body, r);
@@ -811,6 +899,7 @@ fn draw_help_overlay(f: &mut Frame, app: &App, area: Rect) {
             lines.push(h("s / x / K / d", "Start / stop / kill / delete"));
             lines.push(h("l", "Load logs into Logs tab"));
             lines.push(h("e", "Exec /bin/sh in selected container"));
+            lines.push(h("F", "Follow logs (live stream into Logs tab)"));
         }
         Tab::Images => {
             lines.push(section("Images"));
@@ -830,6 +919,7 @@ fn draw_help_overlay(f: &mut Frame, app: &App, area: Rect) {
             lines.push(section("Logs"));
             lines.push(h("/", "Search-as-you-type (highlight matches)"));
             lines.push(h("Ctrl-R", "Toggle regex search mode"));
+            lines.push(h("F", "Toggle follow stream on/off"));
             lines.push(h("Esc", "Clear search"));
         }
     }
@@ -956,7 +1046,19 @@ fn draw_build_prompt_overlay(f: &mut Frame, app: &App, area: Rect) {
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "Tab switches fields · Enter starts build · Esc cancels",
+            {
+                let n = app.prefs.recent_builds.len();
+                let recents_hint = if n > 0 {
+                    let pos = match app.recent_idx {
+                        Some(i) => format!("{}/{n}", i + 1),
+                        None => "—".into(),
+                    };
+                    format!("↑↓ recent ({pos})")
+                } else {
+                    "(no recent builds)".into()
+                };
+                format!("Tab switches fields · ^O file picker · Enter starts · Esc cancels · {recents_hint}")
+            },
             Style::default().fg(app.theme.muted),
         )),
     ])
