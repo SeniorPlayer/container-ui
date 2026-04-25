@@ -43,6 +43,9 @@ pub enum Mode {
     PromptPull,
     Detail,
     PullProgress,
+    /// Search-as-you-type within the Logs tab. Highlights matching substrings
+    /// in place; Enter exits but keeps the highlight; Esc clears.
+    LogSearch,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -104,6 +107,12 @@ pub struct App {
     /// operate on this set when non-empty (else fall back to the highlighted
     /// row only).
     pub marked: HashSet<String>,
+
+    /// Search query active on the Logs tab.
+    pub log_search: String,
+    /// What we're currently pulling, if anything (used to label the gauge and
+    /// the backgrounded-pull indicator in the status bar).
+    pub pull_reference: Option<String>,
 }
 
 impl App {
@@ -134,6 +143,20 @@ impl App {
             pull_log: Arc::new(Mutex::new(Vec::new())),
             pull_running: false,
             marked: HashSet::new(),
+            log_search: String::new(),
+            pull_reference: None,
+        }
+    }
+
+    /// Whether a pull's modal is worth re-opening: either it's running, or it
+    /// finished and the log buffer still has content to show.
+    pub fn pull_attachable(&self) -> bool {
+        if self.pull_running {
+            return true;
+        }
+        match self.pull_log.lock() {
+            Ok(v) => !v.is_empty(),
+            Err(_) => false,
         }
     }
 

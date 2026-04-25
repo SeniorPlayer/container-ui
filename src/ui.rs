@@ -2,13 +2,15 @@
 
 use crate::app::{App, Mode, Tab};
 use crate::jsonhl;
+use crate::pullprog;
 use humansize::{format_size, BINARY};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, TableState, Tabs, Wrap,
+        Block, Borders, Cell, Clear, Gauge, Paragraph, Row, Sparkline, Table, TableState, Tabs,
+        Wrap,
     },
     Frame,
 };
@@ -37,7 +39,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::Detail => draw_detail_overlay(f, app, area),
         Mode::PromptPull => draw_prompt_overlay(f, app, area),
         Mode::PullProgress => draw_pull_overlay(f, app, area),
-        Mode::Browse | Mode::Filter => {}
+        Mode::Browse | Mode::Filter | Mode::LogSearch => {}
     }
 }
 
@@ -348,19 +350,84 @@ fn draw_networks(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_logs(f: &mut Frame, app: &App, area: Rect) {
-    let title = match &app.log_target {
-        Some(id) => format!(" Logs · {id} (l on Containers tab to load) "),
-        None => " Logs (select a container, press l) ".to_string(),
+    let title = match (&app.log_target, app.log_search.is_empty()) {
+        (Some(id), true) => format!(" Logs · {id} (/ search · l reload) "),
+        (Some(id), false) => format!(
+            " Logs · {id} · search:{}  ({} matches) ",
+            app.log_search,
+            count_matches(&app.logs, &app.log_search)
+        ),
+        (None, _) => " Logs (select a container, press l) ".to_string(),
     };
-    let body = if app.logs.is_empty() {
-        "No logs loaded.".to_string()
+
+    let lines: Vec<Line> = if app.logs.is_empty() {
+        vec![Line::from("No logs loaded.")]
+    } else if app.log_search.is_empty() {
+        app.logs.lines().map(|l| Line::from(l.to_string())).collect()
     } else {
-        app.logs.clone()
+        app.logs
+            .lines()
+            .map(|l| highlight_search(l, &app.log_search))
+            .collect()
     };
-    let p = Paragraph::new(body)
+
+    let p = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .block(Block::default().borders(Borders::ALL).title(title));
     f.render_widget(p, area);
+}
+
+fn count_matches(text: &str, needle: &str) -> usize {
+    if needle.is_empty() {
+        return 0;
+    }
+    let needle = needle.to_lowercase();
+    text.lines()
+        .map(|l| {
+            let lower = l.to_lowercase();
+            let mut start = 0usize;
+            let mut n = 0;
+            while let Some(off) = lower[start..].find(&needle) {
+                n += 1;
+                start += off + needle.len().max(1);
+            }
+            n
+        })
+        .sum()
+}
+
+/// Render a single log line as a sequence of Spans, with case-insensitive
+/// highlighting of any occurrence of `needle`. Preserves original casing.
+fn highlight_search(line: &str, needle: &str) -> Line<'static> {
+    if needle.is_empty() {
+        return Line::from(line.to_string());
+    }
+    let lower = line.to_lowercase();
+    let needle_lc = needle.to_lowercase();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(off) = lower[cursor..].find(&needle_lc) {
+        let abs = cursor + off;
+        if abs > cursor {
+            spans.push(Span::raw(line[cursor..abs].to_string()));
+        }
+        let end = abs + needle.len();
+        spans.push(Span::styled(
+            line[abs..end].to_string(),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+        cursor = end;
+        if needle.is_empty() {
+            break;
+        }
+    }
+    if cursor < line.len() {
+        spans.push(Span::raw(line[cursor..].to_string()));
+    }
+    Line::from(spans)
 }
 
 fn draw_filter_bar(f: &mut Frame, app: &App, area: Rect) {
@@ -375,6 +442,17 @@ fn draw_filter_bar(f: &mut Frame, app: &App, area: Rect) {
             ),
         ]));
         f.render_widget(p, area);
+    } else if app.mode == Mode::LogSearch {
+        let p = Paragraph::new(Line::from(vec![
+            Span::styled(" /", Style::default().fg(Color::Yellow)),
+            Span::raw(&app.log_search),
+            Span::styled("█", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                "   (search-as-you-type · Enter keep · Esc clear)",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+        f.render_widget(p, area);
     } else if !app.filter.is_empty() {
         let p = Paragraph::new(Line::from(vec![
             Span::styled(" filter: ", Style::default().fg(Color::DarkGray)),
@@ -382,14 +460,51 @@ fn draw_filter_bar(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("   (/ edit · Esc clear)", Style::default().fg(Color::DarkGray)),
         ]));
         f.render_widget(p, area);
+    } else if app.tab == Tab::Logs && !app.log_search.is_empty() {
+        let p = Paragraph::new(Line::from(vec![
+            Span::styled(" search: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&app.log_search, Style::default().fg(Color::Yellow)),
+            Span::styled("   (/ edit · Esc clear)", Style::default().fg(Color::DarkGray)),
+        ]));
+        f.render_widget(p, area);
     }
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
-    let p = Paragraph::new(Line::from(vec![Span::styled(
+    let mut spans = vec![Span::styled(
         format!(" {} ", app.status),
         Style::default().fg(Color::Black).bg(Color::White),
-    )]));
+    )];
+    // Background-pull indicator: visible whenever a pull is running OR finished
+    // but not currently focused, prompting the user to re-attach with `P`.
+    if app.pull_attachable() && app.mode != Mode::PullProgress {
+        let pct = app
+            .pull_log
+            .lock()
+            .ok()
+            .and_then(|v| pullprog::parse_progress(&v))
+            .map(|p| format!("{:.0}%", p * 100.0))
+            .unwrap_or_else(|| "…".into());
+        let label = match (&app.pull_reference, app.pull_running) {
+            (Some(r), true) => format!(" ⟳ pulling {r} {pct}  P to view "),
+            (Some(r), false) => format!(" ✓ pulled {r}  P to view "),
+            (None, true) => " ⟳ pull running · P to view ".into(),
+            (None, false) => " ✓ pull done · P to view ".into(),
+        };
+        let style = if app.pull_running {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Green)
+                .add_modifier(Modifier::BOLD)
+        };
+        spans.push(Span::styled(label, style));
+    }
+    let p = Paragraph::new(Line::from(spans));
     f.render_widget(p, area);
 }
 
@@ -460,33 +575,71 @@ fn draw_prompt_overlay(f: &mut Frame, app: &App, area: Rect) {
 fn draw_pull_overlay(f: &mut Frame, app: &App, area: Rect) {
     let r = centered(area, 80, 60);
     f.render_widget(Clear, r);
+
     let lines = match app.pull_log.lock() {
         Ok(v) => v.clone(),
         Err(_) => vec!["<lock poisoned>".to_string()],
     };
-    let total = lines.len();
-    // Show last N lines that fit.
-    let h = r.height.saturating_sub(2) as usize;
-    let start = total.saturating_sub(h);
-    let body = lines[start..].join("\n");
-    let title = if app.pull_running {
-        format!(" Pulling… · {total} lines · Esc hide ")
-    } else {
-        format!(" Pull complete · {total} lines · Esc close ")
+    let progress = pullprog::parse_progress(&lines);
+    let status_line = pullprog::status_label(&lines);
+
+    let title = match (&app.pull_reference, app.pull_running) {
+        (Some(r), true) => format!(" Pulling {r} · Esc backgrounds (P re-attach) "),
+        (Some(r), false) => format!(" Pulled {r} · Esc closes "),
+        (None, true) => " Pulling… · Esc backgrounds (P re-attach) ".to_string(),
+        (None, false) => " Pull complete · Esc closes ".to_string(),
     };
-    let p = Paragraph::new(body)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(if app.pull_running {
-                    Color::Yellow
-                } else {
-                    Color::Green
-                }))
-                .title(title),
-        );
-    f.render_widget(p, r);
+    let border_color = if app.pull_running { Color::Yellow } else { Color::Green };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .title(Span::styled(title, Style::default().fg(border_color).add_modifier(Modifier::BOLD)));
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+
+    // Reserve top 3 rows for the gauge, the rest for the stream.
+    let split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .split(inner);
+
+    // --- Gauge ---
+    let pct = progress.unwrap_or(0.0);
+    let gauge_label = match (progress, app.pull_running) {
+        (Some(p), _) => format!("{:>5.1}% — {}", p * 100.0, truncate(&status_line, inner.width.saturating_sub(20) as usize)),
+        (None, true) => format!("…  {}", truncate(&status_line, inner.width.saturating_sub(8) as usize)),
+        (None, false) => "done".to_string(),
+    };
+    let gauge_color = if !app.pull_running || pct >= 0.66 {
+        Color::Green
+    } else if pct >= 0.33 {
+        Color::Yellow
+    } else {
+        Color::Cyan
+    };
+    let g = Gauge::default()
+        .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(Color::DarkGray)))
+        .gauge_style(Style::default().fg(gauge_color).bg(Color::Black))
+        .ratio(if app.pull_running { pct } else { 1.0 })
+        .label(Span::styled(gauge_label, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)));
+    f.render_widget(g, split[0]);
+
+    // --- Stream tail ---
+    let h = split[1].height as usize;
+    let start = lines.len().saturating_sub(h);
+    let body = lines[start..].join("\n");
+    let p = Paragraph::new(body).wrap(Wrap { trim: false });
+    f.render_widget(p, split[1]);
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if max == 0 || s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 fn short_digest(d: &str) -> String {

@@ -2,6 +2,7 @@ mod app;
 mod cli;
 mod container;
 mod jsonhl;
+mod pullprog;
 mod ui;
 
 use anyhow::Result;
@@ -149,6 +150,7 @@ async fn handle_key<B: ratatui::backend::Backend>(
                         v.clear();
                     }
                     app.pull_running = true;
+                    app.pull_reference = Some(reference.clone());
                     *pull_handle = Some(container::spawn_pull(reference.clone(), app.pull_log.clone()));
                     app.mode = Mode::PullProgress;
                     app.set_status(format!("pulling {reference}…"));
@@ -188,6 +190,34 @@ async fn handle_key<B: ratatui::backend::Backend>(
         Mode::PullProgress => {
             if matches!(code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter) {
                 app.mode = Mode::Browse;
+                if app.pull_running {
+                    app.set_status("pull running in background · P to re-attach");
+                }
+            }
+            return Ok(());
+        }
+        Mode::LogSearch => {
+            match code {
+                KeyCode::Esc => {
+                    app.log_search.clear();
+                    app.mode = Mode::Browse;
+                    app.reset_status();
+                }
+                KeyCode::Enter => {
+                    app.mode = Mode::Browse;
+                    if app.log_search.is_empty() {
+                        app.reset_status();
+                    } else {
+                        app.set_status(format!("search: {}", app.log_search));
+                    }
+                }
+                KeyCode::Backspace => {
+                    app.log_search.pop();
+                }
+                KeyCode::Char(c) => {
+                    app.log_search.push(c);
+                }
+                _ => {}
             }
             return Ok(());
         }
@@ -200,6 +230,9 @@ async fn handle_key<B: ratatui::backend::Backend>(
             if !app.filter.is_empty() {
                 app.filter.clear();
                 app.selected = 0;
+                app.reset_status();
+            } else if app.tab == Tab::Logs && !app.log_search.is_empty() {
+                app.log_search.clear();
                 app.reset_status();
             } else {
                 app.running = false;
@@ -225,8 +258,21 @@ async fn handle_key<B: ratatui::backend::Backend>(
             app.refresh().await.ok();
         }
         KeyCode::Char('/') => {
-            app.mode = Mode::Filter;
-            app.set_status("Filter…");
+            if app.tab == Tab::Logs {
+                app.mode = Mode::LogSearch;
+                app.set_status("Search logs…");
+            } else {
+                app.mode = Mode::Filter;
+                app.set_status("Filter…");
+            }
+        }
+        KeyCode::Char('P') => {
+            if app.pull_attachable() {
+                app.mode = Mode::PullProgress;
+                app.set_status("re-attached to pull");
+            } else {
+                app.set_status("no pull to re-attach");
+            }
         }
         KeyCode::Char('o') => {
             app.sort_key = app.sort_key.cycle(app.tab);

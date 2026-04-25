@@ -65,6 +65,11 @@ cgui tui        # same
 | `l`            | Load logs for selected → Logs tab               |
 | `e`            | **Exec** — drop into `/bin/sh` in selected container (Ctrl-D returns to TUI) |
 | `p`            | **Pull** an image (Images tab) — opens prompt + live progress modal |
+| `P`            | **Re-attach** to a backgrounded pull (running or recently-finished) |
+
+On the Logs tab `/` enters **search-as-you-type**: matches highlight in yellow as you type, with a live match counter in the title (`Logs · foo · search:err  (4 matches)`). Enter exits the input but keeps the highlight; `Esc` clears.
+
+The pull modal renders a colored **Gauge** driven by a permissive parser of the streamed output (recognises `42%`, `12.3MB/45.6MB`, and `3/8` layer ratios — newest match wins). `Esc` backgrounds the modal: a yellow `⟳ pulling ref 42% — P to view` chip appears in the status bar so you can re-open it any time. When the pull finishes the chip turns green; pressing `P` shows the final log.
 
 The Containers table shows **live CPU% and MEM** (used / limit) per row when a stats sample is available, with traffic-light coloring. Marked rows display a yellow `●` in the leftmost column.
 
@@ -119,12 +124,15 @@ State refresh is async and best-effort: if one source (e.g. `volume ls`) fails, 
 | Per-row live CPU/MEM in Containers table             | ✅ shipped | 0.3.0           |
 | `Space` multi-select + batch start/stop/kill/delete  | ✅ shipped | 0.3.0           |
 | Syntax-highlighted JSON in inspect pane              | ✅ shipped | 0.3.0           |
+| Parsed % gauge for image pulls                       | ✅ shipped | 0.4.0           |
+| Search-as-you-type in Logs tab (highlighted matches) | ✅ shipped | 0.4.0           |
+| `Esc` backgrounds pull modal · `P` re-attaches       | ✅ shipped | 0.4.0           |
 | Optional GUI front end (Tauri)                       | 🟡 planned | —               |
 
 ## Roadmap
 
 - Optional GUI front end (Tauri) sharing the same `container.rs` core
-- `image pull` progress as a parsed % bar (currently raw stderr stream)
-- Search-as-you-type incremental highlighting in the Logs tab
 - Volumes detail: mount usage / contents (pending CLI support)
-- Re-attach to a long-running pull modal after pressing `Esc`
+- Per-tab help overlay (`?`)
+- Mouse support: click-to-select rows, click tabs
+- Persist user preferences (last tab, sort key, show-all toggle) to `~/.config/cgui/`
