@@ -280,8 +280,22 @@ pub struct App {
     /// Latest parsed Trivy report, if a scan finished successfully.
     pub trivy_report: Option<crate::trivy::Report>,
     pub trivy_scroll: u16,
+    /// Severity filter for the trivy results table; None shows all.
+    pub trivy_filter: Option<crate::trivy::Severity>,
     /// Captured trivy JSON body (filled by spawn_trivy on completion).
     pub trivy_json: Arc<Mutex<String>>,
+
+    /// Healthcheck state per (stack, service). Driven by the background
+    /// healthcheck/restart task.
+    pub health: HashMap<(String, String), HealthEntry>,
+}
+
+#[derive(Clone, Debug, Default)]
+#[allow(dead_code)] // last_check is recorded for future "stale" rendering
+pub struct HealthEntry {
+    pub ok: Option<bool>,
+    pub last_check: Option<std::time::SystemTime>,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -387,7 +401,9 @@ impl App {
             },
             trivy_report: None,
             trivy_scroll: 0,
+            trivy_filter: None,
             trivy_json: Arc::new(Mutex::new(String::new())),
+            health: HashMap::new(),
         }
     }
 

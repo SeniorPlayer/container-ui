@@ -79,6 +79,7 @@ cgui tui        # same
 | `T`            | (Images) **Trivy scan** of selected image (HIGH+CRITICAL) |
 | `u` / `D`      | (Stacks) **Up** / **Down** the selected stack       |
 | `n` / `E`      | (Stacks) **New** stack (template + `$EDITOR`) · **Edit** selected stack |
+| `1`-`4` / `0`  | (Trivy modal) filter by severity (CRITICAL/HIGH/MEDIUM/LOW) · clear |
 
 On the Logs tab `/` enters **search-as-you-type**: matches highlight in yellow as you type, with a live match counter in the title (`Logs · foo · search:err  (4 matches)`). Enter exits the input but keeps the highlight; `Esc` clears.
 
@@ -179,6 +180,35 @@ In the TUI: `u` brings the stack up (`container run -d --name <stack>_<service> 
 
 A starter `example.toml` is dropped on first run. The Stacks tab's `Enter` opens a detail pane showing the parsed services and the exact `container run` plan.
 
+#### Restart policy + healthchecks
+
+Each service can declare a `restart` policy and a `healthcheck` block:
+
+```toml
+[[service]]
+name = "db"
+image = "docker.io/pgvector/pgvector:pg16"
+ports = ["15432:5432"]
+restart = "always"          # "always" | "on-failure" | "no" (default)
+
+[service.healthcheck]
+kind = "tcp"                # "tcp" or "cmd"
+target = "15432"            # for tcp: host port; for cmd: ignored
+interval_s = 30             # default 30
+# command = ["pg_isready", "-U", "postgres"]   # for kind = "cmd"
+```
+
+A background loop (every ~10 s) checks each service's container state. If the policy is `always`, any stopped/exited container is restarted; `on-failure` only restarts on a non-zero exit. The `HEALTH` and `RESTART` columns on the Stacks tab show the rolled-up state per stack:
+
+- `HEALTH`: `✓ healthy (N)` / `✗ unhealthy` / `partial` / `waiting` / blank if no service has a healthcheck
+- `RESTART`: e.g. `always:2 on-fail:1` / `—` if no service has a policy
+
+The detail pane (Enter on a stack) shows per-service health probe results with the last message.
+
+#### Live reload
+
+Stack files are watched via FSEvents on macOS. Editing a `*.toml` in `~/.config/cgui/stacks/` triggers an automatic reload — no need to press `r` or restart the TUI. New files appear immediately; deleted files vanish on the next refresh tick.
+
 ### `cgui doctor`
 
 ```
@@ -205,6 +235,8 @@ If [trivy](https://github.com/aquasecurity/trivy) is on `$PATH`, press `T` on an
 - ↑↓/PgUp/PgDn to scroll, Esc to close
 
 If parsing fails (older trivy schema or malformed output) the raw stream stays visible — no data is lost.
+
+In the results modal: press `1`/`c` for CRITICAL, `2`/`h` for HIGH, `3`/`m` for MEDIUM, `4`/`l` for LOW, or `0` to clear the filter. The active severity gets an underline on its count chip.
 
 ### Importing docker-compose.yml
 
@@ -299,11 +331,19 @@ State refresh is async and best-effort: if one source (e.g. `volume ls`) fails, 
 | Stack create/edit in TUI (`n`/`E` → `$EDITOR`)        | ✅ shipped | 0.10.0         |
 | Parsed Trivy results modal (severity-grouped table)   | ✅ shipped | 0.10.0         |
 | `cgui import-compose` (docker-compose.yml → stack)    | ✅ shipped | 0.10.0         |
+| Stack `restart` + `[service.healthcheck]` (tcp/cmd)   | ✅ shipped | 0.11.0         |
+| Trivy filter-by-severity (1-4 / c/h/m/l, 0 clears)    | ✅ shipped | 0.11.0         |
+| FSEvents-driven stack-file live reload                | ✅ shipped | 0.11.0         |
+| MIT LICENSE                                           | ✅ shipped | 0.11.0         |
 | Optional GUI front end (Tauri)                        | 🟡 planned | —              |
 
 ## Roadmap
 
 - Optional GUI front end (Tauri) sharing the same `container.rs` core
-- Stack restart-policy + healthcheck support
-- Trivy results: filter by severity / search by CVE
-- Live re-parse of stack files on disk (inotify/FSEvents)
+- HTTP healthcheck kind (currently tcp + cmd)
+- Per-service log multiplex on the Stacks tab
+- Trivy CVE search bar (in addition to severity filter)
+
+## License
+
+[MIT](LICENSE) © 2026 Dave Graham

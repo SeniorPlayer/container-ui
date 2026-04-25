@@ -52,6 +52,48 @@ pub struct Service {
     pub depends_on: Vec<String>,
     #[serde(default)]
     pub args: Vec<String>,
+    /// `"no"` (default), `"always"`, or `"on-failure"`. Anything else is
+    /// treated as `"no"`.
+    #[serde(default)]
+    pub restart: Option<String>,
+    pub healthcheck: Option<Healthcheck>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Healthcheck {
+    /// `"tcp"` (default) or `"cmd"`. cmd runs `container exec <name> <command…>`.
+    #[serde(default = "default_kind")]
+    pub kind: String,
+    /// For tcp: a port number (matched against the hostPort in the published
+    /// ports list, or the bare container port if not published). For cmd: an
+    /// argv list.
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub command: Vec<String>,
+    /// Seconds between checks. Default 30.
+    #[serde(default = "default_interval")]
+    pub interval_s: u64,
+}
+
+fn default_kind() -> String { "tcp".into() }
+fn default_interval() -> u64 { 30 }
+
+impl Service {
+    pub fn restart_policy(&self) -> RestartPolicy {
+        match self.restart.as_deref().unwrap_or("no") {
+            "always" => RestartPolicy::Always,
+            "on-failure" => RestartPolicy::OnFailure,
+            _ => RestartPolicy::No,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RestartPolicy {
+    No,
+    Always,
+    OnFailure,
 }
 
 /// Load every `*.toml` in the stacks dir.
@@ -75,7 +117,7 @@ pub fn load_all() -> Vec<Stack> {
     out
 }
 
-fn stacks_dir() -> Option<PathBuf> {
+pub fn stacks_dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;

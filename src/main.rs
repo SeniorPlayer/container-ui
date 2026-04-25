@@ -11,6 +11,7 @@ mod stacks;
 mod theme;
 mod trivy;
 mod ui;
+mod watcher;
 
 use anyhow::Result;
 use clap::Parser;
@@ -75,6 +76,12 @@ async fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>) -> Res
     let mut pull_handle: Option<tokio::task::JoinHandle<Result<()>>> = None;
     let mut log_handle: Option<tokio::task::JoinHandle<Result<()>>> = None;
 
+    // Background watchers: filesystem events + restart/healthcheck loop.
+    let (watch_tx, mut watch_rx) =
+        tokio::sync::mpsc::unbounded_channel::<watcher::Event>();
+    let _fs_watcher = watcher::spawn_fs_watcher(watch_tx.clone());
+    let _bg_handle = watcher::spawn_restart_health(watch_tx.clone());
+
     while app.running {
         // Reap a finished follow task and clear the running flag.
         if let Some(h) = log_handle.as_ref() {
@@ -124,6 +131,11 @@ async fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>) -> Res
                 }
             }
             _ = redraw.tick() => { /* re-render only */ }
+            ev = watch_rx.recv() => {
+                if let Some(e) = ev {
+                    handle_watcher_event(&mut app, e);
+                }
+            }
             ev = events.next() => {
                 match ev {
                     Some(Ok(Event::Key(k))) => {
@@ -532,6 +544,7 @@ async fn handle_key<B: ratatui::backend::Backend>(
             return Ok(());
         }
         Mode::TrivyResult => {
+            use crate::trivy::Severity;
             match code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
                     app.mode = Mode::Browse;
@@ -547,6 +560,26 @@ async fn handle_key<B: ratatui::backend::Backend>(
                 }
                 KeyCode::PageUp => {
                     app.trivy_scroll = app.trivy_scroll.saturating_sub(10);
+                }
+                KeyCode::Char('1') | KeyCode::Char('c') => {
+                    app.trivy_filter = Some(Severity::Critical);
+                    app.trivy_scroll = 0;
+                }
+                KeyCode::Char('2') | KeyCode::Char('h') => {
+                    app.trivy_filter = Some(Severity::High);
+                    app.trivy_scroll = 0;
+                }
+                KeyCode::Char('3') | KeyCode::Char('m') => {
+                    app.trivy_filter = Some(Severity::Medium);
+                    app.trivy_scroll = 0;
+                }
+                KeyCode::Char('4') | KeyCode::Char('l') => {
+                    app.trivy_filter = Some(Severity::Low);
+                    app.trivy_scroll = 0;
+                }
+                KeyCode::Char('0') => {
+                    app.trivy_filter = None;
+                    app.trivy_scroll = 0;
                 }
                 _ => {}
             }
@@ -1042,6 +1075,32 @@ async fn open_detail(app: &mut App) {
     }
 }
 
+fn handle_watcher_event(app: &mut App, ev: watcher::Event) {
+    match ev {
+        watcher::Event::StacksChanged => {
+            app.reload_stacks();
+        }
+        watcher::Event::Health {
+            stack,
+            service,
+            ok,
+            message,
+        } => {
+            app.health.insert(
+                (stack, service),
+                app::HealthEntry {
+                    ok: Some(ok),
+                    last_check: Some(std::time::SystemTime::now()),
+                    message,
+                },
+            );
+        }
+        watcher::Event::Status(s) => {
+            app.set_status(s);
+        }
+    }
+}
+
 async fn edit_stack<B: ratatui::backend::Backend>(
     term: &mut Terminal<B>,
     app: &mut App,
@@ -1111,6 +1170,27 @@ fn stack_detail_text(app: &App) -> String {
         if !svc.env.is_empty() {
             let env: Vec<String> = svc.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
             let _ = writeln!(out, "    env:      {}", env.join(", "));
+        }
+        match svc.restart_policy() {
+            stacks::RestartPolicy::No => {}
+            p => {
+                let _ = writeln!(out, "    restart:  {:?}", p);
+            }
+        }
+        if let Some(hc) = &svc.healthcheck {
+            let _ = writeln!(
+                out,
+                "    health:   {} target={:?} command={:?} interval={}s",
+                hc.kind, hc.target, hc.command, hc.interval_s
+            );
+            if let Some(h) = app.health.get(&(s.name.clone(), svc.name.clone())) {
+                let mark = match h.ok {
+                    Some(true) => "✓",
+                    Some(false) => "✗",
+                    None => "·",
+                };
+                let _ = writeln!(out, "              last: {mark} {}", h.message);
+            }
         }
     }
     let _ = writeln!(out, "\n== Run plan (topo) ==");

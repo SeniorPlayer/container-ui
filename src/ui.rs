@@ -459,7 +459,8 @@ fn draw_networks(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_stacks(f: &mut Frame, app: &mut App, area: Rect) {
-    let header = Row::new(vec!["NAME", "SERVICES", "RUNNING", "SOURCE"]).style(header_style());
+    let header = Row::new(vec!["NAME", "SERVICES", "RUNNING", "HEALTH", "RESTART", "SOURCE"])
+        .style(header_style());
     let view = app.view_indices();
     let running_names: std::collections::HashSet<String> = app
         .containers
@@ -485,6 +486,74 @@ fn draw_stacks(f: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 Style::default().fg(app.theme.warning)
             };
+            // Aggregate health across services that have a healthcheck
+            // configured: ✓ if all known checks are ok, ✗ if any failed,
+            // — if none have run yet, blank if no service has a healthcheck.
+            let configured: Vec<&str> = s
+                .services
+                .iter()
+                .filter(|svc| svc.healthcheck.is_some())
+                .map(|svc| svc.name.as_str())
+                .collect();
+            let (health_label, health_style) = if configured.is_empty() {
+                ("".to_string(), Style::default().fg(app.theme.muted))
+            } else {
+                let mut all_ok = true;
+                let mut any_seen = false;
+                let mut any_fail = false;
+                for svc_name in &configured {
+                    if let Some(h) = app.health.get(&(s.name.clone(), svc_name.to_string())) {
+                        if let Some(ok) = h.ok {
+                            any_seen = true;
+                            if !ok {
+                                all_ok = false;
+                                any_fail = true;
+                            }
+                        }
+                    } else {
+                        all_ok = false;
+                    }
+                }
+                if !any_seen {
+                    ("waiting".into(), Style::default().fg(app.theme.muted))
+                } else if any_fail {
+                    (
+                        "✗ unhealthy".into(),
+                        Style::default().fg(app.theme.danger).add_modifier(Modifier::BOLD),
+                    )
+                } else if all_ok {
+                    (
+                        format!("✓ healthy ({})", configured.len()),
+                        Style::default().fg(app.theme.success).add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    ("partial".into(), Style::default().fg(app.theme.warning))
+                }
+            };
+
+            // Restart-policy summary: "always·on-fail·no" counts.
+            let mut n_always = 0;
+            let mut n_onfail = 0;
+            for svc in &s.services {
+                match svc.restart_policy() {
+                    crate::stacks::RestartPolicy::Always => n_always += 1,
+                    crate::stacks::RestartPolicy::OnFailure => n_onfail += 1,
+                    _ => {}
+                }
+            }
+            let restart_label = if n_always == 0 && n_onfail == 0 {
+                "—".to_string()
+            } else {
+                let mut parts = Vec::new();
+                if n_always > 0 {
+                    parts.push(format!("always:{n_always}"));
+                }
+                if n_onfail > 0 {
+                    parts.push(format!("on-fail:{n_onfail}"));
+                }
+                parts.join(" ")
+            };
+
             let src = s
                 .source
                 .as_ref()
@@ -494,14 +563,18 @@ fn draw_stacks(f: &mut Frame, app: &mut App, area: Rect) {
                 Cell::from(s.name.clone()).style(Style::default().fg(app.theme.info).add_modifier(Modifier::BOLD)),
                 Cell::from(total.to_string()),
                 Cell::from(format!("{up}/{total}")).style(running_style),
+                Cell::from(health_label).style(health_style),
+                Cell::from(restart_label).style(Style::default().fg(app.theme.muted)),
                 Cell::from(src).style(Style::default().fg(app.theme.muted)),
             ])
         })
         .collect();
     let widths = [
-        Constraint::Percentage(20),
+        Constraint::Percentage(18),
         Constraint::Length(10),
         Constraint::Length(10),
+        Constraint::Length(20),
+        Constraint::Length(20),
         Constraint::Min(20),
     ];
     let title = block_title(app, "Stacks", app.stacks.len(), rows.len());
@@ -985,10 +1058,13 @@ fn draw_help_overlay(f: &mut Frame, app: &App, area: Rect) {
             lines.push(section("Stacks"));
             lines.push(h("u", "Up — `container run -d` per service in topo order"));
             lines.push(h("D", "Down — stop+delete every service container"));
-            lines.push(h("Enter", "Detail: source path + service list (inspect)"));
+            lines.push(h("Enter", "Detail: source + services + restart + health"));
             lines.push(h("l", "Logs of the stack's first service"));
             lines.push(h("n", "New stack (template + open in $EDITOR)"));
             lines.push(h("E", "Edit selected stack in $EDITOR"));
+            lines.push(h("auto", "Stack files reload on disk change (FSEvents)"));
+            lines.push(h("auto", "restart=always|on-failure re-runs stopped svcs"));
+            lines.push(h("auto", "[service.healthcheck] kind=tcp|cmd · interval_s"));
         }
         Tab::Logs => {
             lines.push(section("Logs"));
@@ -1242,11 +1318,18 @@ fn draw_trivy_result(f: &mut Frame, app: &App, area: Rect) {
         return;
     };
 
+    let filter_label = match app.trivy_filter {
+        None => "all".to_string(),
+        Some(s) => s.label().to_lowercase(),
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(app.theme.accent))
         .title(Span::styled(
-            format!(" Trivy · {} · ↑↓ scroll · Esc close ", report.artifact),
+            format!(
+                " Trivy · {} · filter:{filter_label} · 1-4 filter · 0 clear · Esc close ",
+                report.artifact
+            ),
             Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(r);
@@ -1257,7 +1340,7 @@ fn draw_trivy_result(f: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Length(3), Constraint::Min(1)])
         .split(inner);
 
-    // Severity counts row.
+    // Severity counts row. Active filter chip gets a bright underline.
     let counts = report.counts();
     let mut count_spans: Vec<Span> = Vec::with_capacity(counts.len() * 2);
     for (sev, n) in counts {
@@ -1266,10 +1349,11 @@ fn draw_trivy_result(f: &mut Frame, app: &App, area: Rect) {
         }
         let (fg, bg) = severity_colors(app, sev);
         let chip = format!(" {} {n} ", sev.label());
-        count_spans.push(Span::styled(
-            chip,
-            Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
-        ));
+        let mut style = Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD);
+        if app.trivy_filter == Some(sev) {
+            style = style.add_modifier(Modifier::UNDERLINED);
+        }
+        count_spans.push(Span::styled(chip, style));
         count_spans.push(Span::raw(" "));
     }
     let header = Paragraph::new(Line::from(count_spans)).block(
@@ -1293,6 +1377,10 @@ fn draw_trivy_result(f: &mut Frame, app: &App, area: Rect) {
     let rows: Vec<Row> = report
         .findings
         .iter()
+        .filter(|f| match app.trivy_filter {
+            Some(s) => f.severity == s,
+            None => true,
+        })
         .map(|fnd| {
             let (fg, _) = severity_colors(app, fnd.severity);
             let sev_cell = Cell::from(fnd.severity.label())
