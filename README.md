@@ -433,6 +433,7 @@ State refresh is async and best-effort: if one source (e.g. `volume ls`) fails, 
 | Stack templates + `cgui new`                          | ✅ shipped | 0.14.0         |
 | HTTPS healthcheck (`https://…` target via `curl`)     | ✅ shipped | 0.14.0         |
 | Live stack diff (`=` on Stacks tab)                   | ✅ shipped | 0.14.0         |
+| Pull/build progress targets Apple `--progress=plain` grammar (gated by runtime) | ✅ shipped | 0.14.1 |
 | Optional GUI front end (Tauri)                        | 🟡 planned | —              |
 
 ## Roadmap
@@ -444,7 +445,6 @@ The previous roadmap (HTTPS healthcheck · live stack diff · stack templates) s
 - **CI on push + tag** — `.github/workflows/` for `cargo test --release` + `cargo clippy -- -D warnings` on every push, `cargo fmt --check`, and a release workflow that builds **both** `cgui-aarch64-apple-darwin.tar.gz` and `cgui-x86_64-apple-darwin.tar.gz` and uploads them as assets on tag push (Intel Mac users currently can't self-update).
 - **Integration test for the update modal flow** — phases 1–5 are live but never exercised end-to-end (we're always on `latest`). A test that constructs an `App` with a synthetic `UpdateInfo` and walks `U` / `D` / `L` / `Esc` / cycling through `handle_key` would verify the dispatch table.
 - **Real-binary smoke test** — `tests/smoke.rs` invoking the release binary with `cgui doctor`, `cgui templates`, `cgui update` and asserting exit codes + key strings.
-- **Apple `container --progress=plain` output** — released in `0.12.0`. Tighten `pullprog::parse_progress` against the format Apple ships rather than the heuristics that predated it.
 
 ### Medium priority
 
