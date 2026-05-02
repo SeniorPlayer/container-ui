@@ -57,6 +57,14 @@ pub struct Service {
     #[serde(default)]
     pub restart: Option<String>,
     pub healthcheck: Option<Healthcheck>,
+    /// Linux capabilities to add at runtime. Each entry becomes
+    /// `--cap-add <CAP>` on the spawn command line. Apple's container
+    /// 0.12+ supports this; docker / podman accept the same flag.
+    #[serde(default)]
+    pub cap_add: Vec<String>,
+    /// Linux capabilities to drop. `--cap-drop <CAP>` per entry.
+    #[serde(default)]
+    pub cap_drop: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -81,6 +89,12 @@ pub struct Healthcheck {
     /// Seconds between checks. Default 30.
     #[serde(default = "default_interval")]
     pub interval_s: u64,
+    /// Compose-style startup grace. Probes still run inside the period so
+    /// the user sees activity, but failures are masked as `starting (N/M s)`
+    /// rather than reported as unhealthy. Counts from the first time the
+    /// background task notices the container exists. Default 0 (no grace).
+    #[serde(default)]
+    pub start_period_s: u64,
 }
 
 fn default_kind() -> String { "tcp".into() }
@@ -154,6 +168,14 @@ pub fn run_args(stack: &str, svc: &Service) -> Vec<String> {
     if let Some(n) = &svc.network {
         a.push("--network".into());
         a.push(n.clone());
+    }
+    for cap in &svc.cap_add {
+        a.push("--cap-add".into());
+        a.push(cap.clone());
+    }
+    for cap in &svc.cap_drop {
+        a.push("--cap-drop".into());
+        a.push(cap.clone());
     }
     a.push(svc.image.clone());
     a.extend(svc.args.iter().cloned());
@@ -459,6 +481,10 @@ pub enum DiffRow {
     Missing { service: String, expected_image: String },
     /// Container exists but isn't running.
     NotRunning { service: String, status: String },
+    /// Container whose name starts with `<stack>_` but no current service
+    /// declares it. Usually means a service was renamed or removed in the
+    /// stack file without the corresponding `D` first.
+    Orphan { name: String, status: String },
 }
 
 /// Compare what a stack file declares against what the runtime reports for
@@ -572,6 +598,27 @@ pub async fn diff_against_runtime(stack: &Stack) -> Vec<DiffRow> {
             push_compare(&mut rows, &svc.name, "network", expected_net, &actual_net);
         }
     }
+
+    // Orphan detection: list every container whose name starts with
+    // `<stack>_` but doesn't match a current service. Catches the
+    // "renamed a service in the TOML, forgot to D first" footgun.
+    let prefix = format!("{}_", stack.name);
+    let known: std::collections::HashSet<String> = stack
+        .services
+        .iter()
+        .map(|s| container_name(&stack.name, &s.name))
+        .collect();
+    if let Ok(all) = crate::container::list_containers(true).await {
+        for c in all {
+            if c.id.starts_with(&prefix) && !known.contains(&c.id) {
+                rows.push(DiffRow::Orphan {
+                    name: c.id,
+                    status: c.status,
+                });
+            }
+        }
+    }
+
     rows
 }
 

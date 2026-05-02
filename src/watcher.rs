@@ -77,16 +77,29 @@ pub fn spawn_restart_health(tx: UnboundedSender<Event>) -> tokio::task::JoinHand
         // Per (stack, svc): when last health probe fired.
         let mut last_probe: std::collections::HashMap<(String, String), Instant> =
             std::collections::HashMap::new();
+        // Per (stack, svc): when we first noticed the container existed.
+        // Used by Healthcheck.start_period_s to mask probe failures during
+        // the initial grace window.
+        let mut first_seen: std::collections::HashMap<(String, String), Instant> =
+            std::collections::HashMap::new();
         let mut tick = tokio::time::interval(Duration::from_secs(10));
         loop {
             tick.tick().await;
             let stacks_now = stacks::load_all();
             for stack in &stacks_now {
                 for svc in &stack.services {
+                    // Track first-seen for the start-period grace, regardless
+                    // of restart policy.
+                    let cname = stacks::container_name(&stack.name, &svc.name);
+                    let key = (stack.name.clone(), svc.name.clone());
+                    let exists = container_state(&cname).await;
+                    if exists.is_some() && !first_seen.contains_key(&key) {
+                        first_seen.insert(key.clone(), Instant::now());
+                    }
+
                     // --- restart policy ---
                     if matches!(svc.restart_policy(), RestartPolicy::Always | RestartPolicy::OnFailure) {
-                        let name = stacks::container_name(&stack.name, &svc.name);
-                        if let Some(state) = container_state(&name).await {
+                        if let Some(state) = exists.as_deref() {
                             let should_restart = match svc.restart_policy() {
                                 RestartPolicy::Always => state == "stopped" || state == "exited",
                                 RestartPolicy::OnFailure => state == "exited",
@@ -95,15 +108,17 @@ pub fn spawn_restart_health(tx: UnboundedSender<Event>) -> tokio::task::JoinHand
                             if should_restart {
                                 let _ = tx.send(Event::Status(format!(
                                     "restart: {} ({state}) → start",
-                                    name
+                                    cname
                                 )));
-                                let _ = run_start(&name).await;
+                                let _ = run_start(&cname).await;
+                                // Reset the grace window — a fresh start
+                                // deserves the same kindness.
+                                first_seen.insert(key.clone(), Instant::now());
                             }
                         }
                     }
                     // --- healthcheck ---
                     if let Some(hc) = &svc.healthcheck {
-                        let key = (stack.name.clone(), svc.name.clone());
                         let due = match last_probe.get(&key) {
                             Some(t) => t.elapsed() >= Duration::from_secs(hc.interval_s.max(1)),
                             None => true,
@@ -112,7 +127,24 @@ pub fn spawn_restart_health(tx: UnboundedSender<Event>) -> tokio::task::JoinHand
                             continue;
                         }
                         last_probe.insert(key.clone(), Instant::now());
-                        let (ok, message) = probe(stack, svc, hc).await;
+                        let (mut ok, mut message) = probe(stack, svc, hc).await;
+
+                        // Apply start_period_s grace: while inside the
+                        // window from first_seen, mask failures as
+                        // "starting (N/M s)" so the row doesn't pulse red
+                        // during legitimate boot.
+                        if hc.start_period_s > 0 && !ok {
+                            if let Some(start) = first_seen.get(&key) {
+                                let elapsed = start.elapsed().as_secs();
+                                if elapsed < hc.start_period_s {
+                                    ok = true;
+                                    message = format!(
+                                        "starting ({elapsed}/{}s) — {message}",
+                                        hc.start_period_s
+                                    );
+                                }
+                            }
+                        }
                         let _ = tx.send(Event::Health {
                             stack: stack.name.clone(),
                             service: svc.name.clone(),

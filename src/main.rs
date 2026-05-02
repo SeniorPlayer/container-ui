@@ -33,19 +33,60 @@ use crate::app::{App, ContextAction, ContextMenu, Mode, OperationKind, Tab};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = cli::Cli::parse();
+    let mut cli = cli::Cli::parse();
+    // Strip `--profile <name>` out of the verb argv before dispatch so the
+    // override applies to BOTH the TUI and the Docker-compat shim. The
+    // override is one-shot — we don't persist it to state.json (App's
+    // save_prefs honors `profile_overridden`).
+    let profile_override = extract_profile_override(&mut cli.args);
+    if let Some(name) = profile_override.as_deref() {
+        let profiles = runtime::load_profiles();
+        match profiles.iter().find(|p| p.name == name) {
+            Some(p) => runtime::set_active(p),
+            None => {
+                eprintln!(
+                    "--profile: unknown profile '{name}'. Try `cgui doctor` or check ~/.config/cgui/profiles.toml"
+                );
+                std::process::exit(2);
+            }
+        }
+    }
     if let Some(code) = cli::dispatch_cli(&cli).await? {
         std::process::exit(code);
     }
-    run_tui().await
+    run_tui_with_override(profile_override).await
 }
 
-async fn run_tui() -> Result<()> {
+/// Walks `args`, removes `--profile <name>` (or `--profile=<name>`), and
+/// returns the value if present. Anything else stays in place so the
+/// dispatcher / runtime CLI sees its own args untouched.
+fn extract_profile_override(args: &mut Vec<String>) -> Option<String> {
+    let mut out: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--profile" {
+            if i + 1 < args.len() {
+                out = Some(args.remove(i + 1));
+            }
+            args.remove(i);
+            continue;
+        }
+        if let Some(eq) = args[i].strip_prefix("--profile=") {
+            out = Some(eq.to_string());
+            args.remove(i);
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+async fn run_tui_with_override(profile_override: Option<String>) -> Result<()> {
     enter_terminal()?;
     let backend = CrosstermBackend::new(stdout());
     let mut term = Terminal::new(backend)?;
 
-    let result = event_loop(&mut term).await;
+    let result = event_loop(&mut term, profile_override).await;
 
     leave_terminal()?;
     term.show_cursor()?;
@@ -64,8 +105,26 @@ fn leave_terminal() -> Result<()> {
     Ok(())
 }
 
-async fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>) -> Result<()> {
+async fn event_loop<B: ratatui::backend::Backend>(
+    term: &mut Terminal<B>,
+    profile_override: Option<String>,
+) -> Result<()> {
     let mut app = App::new();
+    // App::new() activated the saved profile from prefs. If the user
+    // passed `--profile` on the CLI, re-apply it now and mark the override
+    // so save_prefs() doesn't persist the temporary choice.
+    if let Some(name) = profile_override {
+        if let Some(p) = app.profiles.iter().find(|p| p.name == name) {
+            runtime::set_active(p);
+            app.profile_overridden = true;
+            app.profile_picker_selected = app
+                .profiles
+                .iter()
+                .position(|x| x.name == name)
+                .unwrap_or(app.profile_picker_selected);
+            app.set_status(format!("runtime overridden via --profile: {name}"));
+        }
+    }
     // First refresh runs inline so the UI has data before the first draw.
     let initial = app::fetch_all(app.show_all).await;
     app.apply_refresh(initial);
@@ -163,8 +222,13 @@ async fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>) -> Res
             _ = tick.tick() => {
                 // Spawn refresh as a background task — never block the
                 // event loop on a slow `container stats` (the runtime can
-                // take ~2s per call when a container is running).
+                // take ~2s per call when a container is running). Also
+                // skip while the user is actively reading a log follow
+                // stream — the underlying tables aren't visible and the
+                // CLI calls just burn cycles.
+                let skip_for_follow = app.tab == Tab::Logs && app.log_following;
                 if refresh_handle.is_none()
+                    && !skip_for_follow
                     && matches!(app.mode, Mode::Browse | Mode::Filter | Mode::PullProgress | Mode::Detail)
                 {
                     refresh_handle = Some(tokio::spawn(app::fetch_all(app.show_all)));
@@ -204,6 +268,55 @@ async fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>) -> Res
 async fn refresh_now(app: &mut App) {
     let r = app::fetch_all(app.show_all).await;
     app.apply_refresh(r);
+}
+
+/// Pipe `text` into `pbcopy` (macOS clipboard). On non-Mac hosts we'd want
+/// `wl-copy` / `xclip`; for now this is macOS-only and silently falls back
+/// to a status-bar message when the binary isn't on PATH.
+fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut child = std::process::Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(text.as_bytes())?;
+    }
+    child.wait()?;
+    Ok(())
+}
+
+/// Helper: yank the visible op-modal log into the clipboard. Reports the
+/// byte count via the status bar for confidence.
+fn yank_pull_log(app: &mut App) {
+    let body = match app.pull_log.lock() {
+        Ok(v) => v.join("\n"),
+        Err(_) => String::new(),
+    };
+    if body.is_empty() {
+        app.set_status("nothing to copy");
+        return;
+    }
+    let n = body.len();
+    match copy_to_clipboard(&body) {
+        Ok(()) => app.set_status(format!("copied {n} bytes to pbcopy")),
+        Err(e) => app.set_status(format!("pbcopy: {e}")),
+    }
+}
+
+fn yank_logs(app: &mut App) {
+    let body = match app.logs_buf.lock() {
+        Ok(v) => v.join("\n"),
+        Err(_) => String::new(),
+    };
+    if body.is_empty() {
+        app.set_status("no logs to copy");
+        return;
+    }
+    let n = body.len();
+    match copy_to_clipboard(&body) {
+        Ok(()) => app.set_status(format!("copied {n} bytes to pbcopy")),
+        Err(e) => app.set_status(format!("pbcopy: {e}")),
+    }
 }
 
 async fn handle_mouse(app: &mut App, m: MouseEvent) {
@@ -541,11 +654,15 @@ async fn handle_key<B: ratatui::backend::Backend>(
             return Ok(());
         }
         Mode::PullProgress => {
-            if matches!(code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter) {
-                app.mode = Mode::Browse;
-                if app.pull_running {
-                    app.set_status("pull running in background · P to re-attach");
+            match code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+                    app.mode = Mode::Browse;
+                    if app.pull_running {
+                        app.set_status("pull running in background · P to re-attach");
+                    }
                 }
+                KeyCode::Char('y') => yank_pull_log(app),
+                _ => {}
             }
             return Ok(());
         }
@@ -1150,6 +1267,7 @@ async fn handle_key<B: ratatui::backend::Backend>(
         KeyCode::Char('d') if app.tab == Tab::Containers => batch_action(app, "delete").await,
         KeyCode::Char('l') if app.tab == Tab::Containers => load_logs(app, log_handle).await,
         KeyCode::Char('F') if app.tab == Tab::Containers => follow_logs(app, log_handle).await,
+        KeyCode::Char('y') if app.tab == Tab::Logs => yank_logs(app),
         KeyCode::Char('F') if app.tab == Tab::Logs => {
             // Toggle: if already following, stop; else start on log_target.
             if app.log_following {

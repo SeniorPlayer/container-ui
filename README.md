@@ -434,6 +434,12 @@ State refresh is async and best-effort: if one source (e.g. `volume ls`) fails, 
 | HTTPS healthcheck (`https://…` target via `curl`)     | ✅ shipped | 0.14.0         |
 | Live stack diff (`=` on Stacks tab)                   | ✅ shipped | 0.14.0         |
 | Pull/build progress targets Apple `--progress=plain` grammar (gated by runtime) | ✅ shipped | 0.14.1 |
+| Per-tab refresh cadence (skip 2 s tick on Logs + follow) | ✅ shipped | 0.14.2 |
+| `y` copies pull/build/log buffer to `pbcopy`           | ✅ shipped | 0.14.2 |
+| `--profile <name>` one-shot CLI override (no persist)  | ✅ shipped | 0.14.2 |
+| Stack `cap_add` / `cap_drop` passthrough              | ✅ shipped | 0.14.2 |
+| Healthcheck `start_period_s` startup grace             | ✅ shipped | 0.14.2 |
+| Stack diff: orphan container detection (`⊗`)           | ✅ shipped | 0.14.2 |
 | Optional GUI front end (Tauri)                        | 🟡 planned | —              |
 
 ## Roadmap
@@ -456,12 +462,7 @@ The previous roadmap (HTTPS healthcheck · live stack diff · stack templates) s
 
 ### Low priority / nice to have
 
-- **Stack `cap_add` passthrough** — needed for anything wanting `NET_ADMIN`, etc.
-- **`--profile <name>` CLI override** — one-shot runtime swap without flipping the saved profile.
-- **Stack diff: detect orphan containers** — list containers whose name starts with `<stack>_` but doesn't match any current service.
-- **Pull/build modal: copy buffer to `pbcopy`** — `y` keybinding for sharing logs.
-- **Healthcheck `start_period_s`** — compose-style grace before the first probe is allowed to fail.
-- **Per-tab refresh cadence** — skip the 2 s refresh while on the Logs tab with a follow stream active.
+(Cleared in 0.14.2.) Suggestions welcome — open an issue.
 
 ### Out of scope (deliberately not planned)
 

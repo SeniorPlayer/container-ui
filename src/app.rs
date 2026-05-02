@@ -301,6 +301,11 @@ pub struct App {
     /// healthcheck/restart task.
     pub health: HashMap<(String, String), HealthEntry>,
 
+    /// True when the active runtime profile came from a CLI `--profile`
+    /// override. We then skip writing it back to `state.json` on save so
+    /// the override stays one-shot.
+    pub profile_overridden: bool,
+
     /// Available upgrades for runtime / cgui itself, populated by the
     /// background update-check task. Empty unless `prefs.auto_update_check`
     /// is true and a newer release exists.
@@ -447,6 +452,7 @@ impl App {
             trivy_search_active: false,
             trivy_json: Arc::new(Mutex::new(String::new())),
             health: HashMap::new(),
+            profile_overridden: false,
             updates: Vec::new(),
             dismissed_updates: HashSet::new(),
             update_modal_idx: 0,
@@ -590,7 +596,12 @@ impl App {
         self.prefs.tab = Some(self.tab.key().to_string());
         self.prefs.show_all = Some(self.show_all);
         self.prefs.sort = self.sort_keys.clone();
-        self.prefs.profile = Some(runtime::name());
+        // Skip profile when it came from a `--profile` CLI override —
+        // those are explicitly one-shot and shouldn't clobber the saved
+        // pref.
+        if !self.profile_overridden {
+            self.prefs.profile = Some(runtime::name());
+        }
         self.prefs.save();
     }
 

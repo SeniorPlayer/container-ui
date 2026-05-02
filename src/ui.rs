@@ -1047,6 +1047,7 @@ fn draw_help_overlay(f: &mut Frame, app: &App, area: Rect) {
     lines.push(h("a", "Toggle show-all vs running-only"));
     lines.push(h("?", "Toggle this help"));
     lines.push(h("X", "Switch runtime profile (container/docker/…)"));
+    lines.push(h("--profile", "CLI: one-shot runtime override (no persist)"));
     lines.push(h("U", "View available updates (when chip is shown)"));
     lines.push(h("Mouse L/R", "Click row · right-click for menu · wheel scrolls"));
     lines.push(Line::from(""));
@@ -1088,19 +1089,22 @@ fn draw_help_overlay(f: &mut Frame, app: &App, area: Rect) {
             lines.push(h("CLI", "`cgui new <name> --template postgres+api`"));
             lines.push(h("auto", "Stack files reload on disk change (FSEvents)"));
             lines.push(h("auto", "restart=always|on-failure re-runs stopped svcs"));
-            lines.push(h("auto", "[service.healthcheck] kind=tcp|cmd · interval_s"));
+            lines.push(h("auto", "[service.healthcheck] tcp|http|https|cmd + start_period_s"));
+            lines.push(h("auto", "service.cap_add / cap_drop append --cap-add/drop"));
         }
         Tab::Logs => {
             lines.push(section("Logs"));
             lines.push(h("/", "Search-as-you-type (highlight matches)"));
             lines.push(h("Ctrl-R", "Toggle regex search mode"));
             lines.push(h("F", "Toggle follow stream on/off"));
+            lines.push(h("y", "Copy log buffer to pbcopy"));
             lines.push(h("Esc", "Clear search"));
         }
     }
     lines.push(Line::from(""));
     lines.push(section("Pull modal"));
     lines.push(h("Esc", "Background the modal (status bar chip + P to re-attach)"));
+    lines.push(h("y", "Copy op log to pbcopy"));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "  Press ? or Esc to close",
@@ -1607,8 +1611,18 @@ fn draw_stack_diff(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .filter(|r| !matches!(r, crate::stacks::DiffRow::Match { .. }))
         .count();
+    let orphans = app
+        .stack_diff_rows
+        .iter()
+        .filter(|r| matches!(r, crate::stacks::DiffRow::Orphan { .. }))
+        .count();
+    let orphan_tag = if orphans > 0 {
+        format!(" · {orphans} orphan{}", if orphans == 1 { "" } else { "s" })
+    } else {
+        String::new()
+    };
     let title = format!(
-        " Diff · {} · {}/{} matched · ↑↓ scroll · Esc close ",
+        " Diff · {} · {}/{} matched{orphan_tag} · ↑↓ scroll · Esc close ",
         target,
         total - mismatches,
         total
@@ -1630,13 +1644,15 @@ fn draw_stack_diff(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::with_capacity(total + 1);
     let mut last_service: Option<String> = None;
     for row in &app.stack_diff_rows {
-        let svc = match row {
-            crate::stacks::DiffRow::Match { service, .. } => service,
-            crate::stacks::DiffRow::Differ { service, .. } => service,
-            crate::stacks::DiffRow::Missing { service, .. } => service,
-            crate::stacks::DiffRow::NotRunning { service, .. } => service,
+        let svc: String = match row {
+            crate::stacks::DiffRow::Match { service, .. } => service.clone(),
+            crate::stacks::DiffRow::Differ { service, .. } => service.clone(),
+            crate::stacks::DiffRow::Missing { service, .. } => service.clone(),
+            crate::stacks::DiffRow::NotRunning { service, .. } => service.clone(),
+            // Orphans grouped under a synthetic "<orphans>" section.
+            crate::stacks::DiffRow::Orphan { .. } => "<orphans>".to_string(),
         };
-        if last_service.as_deref() != Some(svc) {
+        if last_service.as_deref() != Some(svc.as_str()) {
             if last_service.is_some() {
                 lines.push(Line::from(""));
             }
@@ -1644,7 +1660,7 @@ fn draw_stack_diff(f: &mut Frame, app: &App, area: Rect) {
                 format!("[{svc}]"),
                 Style::default().fg(app.theme.info).add_modifier(Modifier::BOLD),
             )));
-            last_service = Some(svc.clone());
+            last_service = Some(svc);
         }
         match row {
             crate::stacks::DiffRow::Match { field, value, .. } => {
@@ -1704,6 +1720,20 @@ fn draw_stack_diff(f: &mut Frame, app: &App, area: Rect) {
                     ),
                     Span::styled("status        ", Style::default().fg(app.theme.muted)),
                     Span::styled(status.clone(), Style::default().fg(app.theme.warning)),
+                ]));
+            }
+            crate::stacks::DiffRow::Orphan { name, status } => {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "  ⊗ ",
+                        Style::default().fg(app.theme.danger).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(format!("{name:<24}"), Style::default().fg(app.theme.warning)),
+                    Span::styled(status.clone(), Style::default().fg(app.theme.muted)),
+                    Span::styled(
+                        "  (no matching service in TOML — `cgui rm` to clean up)",
+                        Style::default().fg(app.theme.muted),
+                    ),
                 ]));
             }
         }
