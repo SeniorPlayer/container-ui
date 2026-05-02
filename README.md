@@ -223,9 +223,21 @@ Stack files are watched via FSEvents on macOS. Editing a `*.toml` in `~/.config/
 
 cgui checks for newer releases of Apple's `container` runtime and of cgui itself, once per startup, against the public GitHub Releases API. Results are cached in `state.json` for 24 hours.
 
-When something is behind, an `⬆ container 0.12.3 → 0.13.0` chip appears in the status bar (one per component). Run `cgui doctor` for the URL or `cgui update` for an ad-hoc fresh check (bypasses the cache).
+When something is behind, an `⬆ container 0.12.3 → 0.13.0 · U to view` chip appears in the status bar (one per component). Press `U` to open the **update prompt** — a centered modal showing:
 
-This is read-only — phase 1 only **detects** updates; nothing is downloaded or installed automatically.
+- component, installed → latest, published date, release URL
+- the first ~80 lines of the GitHub release notes (scrollable with ↑↓/PgUp/PgDn)
+
+Inside the modal:
+
+- `O` opens the release URL in your default browser (`open <url>` on macOS)
+- `L` dismisses *that component* for the rest of the session (the chip vanishes; comes back next launch)
+- `←` / `→` (or `n` / `p`) cycle if multiple components are behind
+- `Esc` closes the modal
+
+Still read-only — nothing is downloaded or installed yet.
+
+`cgui doctor` includes the same information without launching the TUI; `cgui update` forces a fresh API hit (bypasses the 24h cache and the opt-out).
 
 Disable entirely with `cgui --no-update` (persists `auto_update_check = false` in `state.json`). The opt-out is honoured by the background check and `cgui doctor`; the explicit `cgui update` subcommand always runs.
 
@@ -362,6 +374,7 @@ State refresh is async and best-effort: if one source (e.g. `volume ls`) fails, 
 | Per-service log multiplex (`L` on Stacks)             | ✅ shipped | 0.12.0         |
 | Trivy CVE search bar (`/` in results modal)           | ✅ shipped | 0.12.0         |
 | Update detection (status chip + `cgui doctor` row)    | ✅ shipped | 0.13.0         |
+| Update prompt modal (`U`, `[O]pen`, `[L]ater`)        | ✅ shipped | 0.13.1         |
 | Optional GUI front end (Tauri)                        | 🟡 planned | —              |
 
 ## Roadmap

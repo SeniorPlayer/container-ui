@@ -34,13 +34,15 @@ impl Component {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // published_at is surfaced by future phases (modal/notes)
 pub struct UpdateInfo {
     pub component: Component,
     pub installed: String,
     pub latest: String,
     pub release_url: String,
     pub published_at: String,
+    /// Release notes body, trimmed and capped. Empty if the API didn't
+    /// return one or it failed to decode as UTF-8.
+    pub notes: String,
 }
 
 /// Cached snapshot of one component's most recent check. Persisted in
@@ -52,6 +54,8 @@ pub struct CachedRelease {
     pub release_url: String,
     pub published_at: String,
     pub fetched_at: u64,          // unix seconds
+    #[serde(default)]
+    pub notes: String,
 }
 
 const CACHE_TTL_SECS: u64 = 24 * 60 * 60;
@@ -103,6 +107,7 @@ async fn check_component(
                 release_url: fresh.html_url,
                 published_at: fresh.published_at,
                 fetched_at: now,
+                notes: trim_notes(&fresh.body),
             };
             prefs
                 .update_cache
@@ -121,10 +126,19 @@ async fn check_component(
             latest: latest.latest_tag,
             release_url: latest.release_url,
             published_at: latest.published_at,
+            notes: latest.notes,
         })
     } else {
         None
     }
+}
+
+/// Cap release notes so a runaway body can't blow up the modal or the
+/// state.json on disk. We keep ~80 lines of `\n`-trimmed body.
+fn trim_notes(body: &str) -> String {
+    let body = body.replace("\r\n", "\n");
+    let lines: Vec<&str> = body.lines().take(80).collect();
+    lines.join("\n")
 }
 
 fn installed_version(c: Component) -> Option<String> {
@@ -156,6 +170,8 @@ struct GhRelease {
     html_url: String,
     #[serde(default)]
     published_at: String,
+    #[serde(default)]
+    body: String,
 }
 
 async fn fetch_latest(repo: &str) -> Option<GhRelease> {

@@ -81,6 +81,9 @@ pub enum Mode {
     PromptStackName,
     /// Parsed Trivy scan results modal.
     TrivyResult,
+    /// Phase-2 update prompt: shows release notes and lets the user dismiss
+    /// or open the release URL. No download/install yet.
+    UpdatePrompt,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -296,6 +299,13 @@ pub struct App {
     /// background update-check task. Empty unless `prefs.auto_update_check`
     /// is true and a newer release exists.
     pub updates: Vec<crate::update::UpdateInfo>,
+    /// Component labels the user dismissed *for this session* via
+    /// `[L]ater`. Filtered out of chip rendering; cleared on restart.
+    pub dismissed_updates: HashSet<String>,
+    /// Index into `visible_updates()` for the modal.
+    pub update_modal_idx: usize,
+    /// Scroll offset in the modal's release-notes pane.
+    pub update_notes_scroll: u16,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -415,6 +425,9 @@ impl App {
             trivy_json: Arc::new(Mutex::new(String::new())),
             health: HashMap::new(),
             updates: Vec::new(),
+            dismissed_updates: HashSet::new(),
+            update_modal_idx: 0,
+            update_notes_scroll: 0,
         }
     }
 
@@ -509,6 +522,26 @@ impl App {
                 self.build_tag = recents[new_i].tag.clone().unwrap_or_default();
             }
             _ => {}
+        }
+    }
+
+    /// Updates not dismissed for the current session. Drives both the
+    /// status-bar chip and the modal cycler.
+    pub fn visible_updates(&self) -> Vec<&crate::update::UpdateInfo> {
+        self.updates
+            .iter()
+            .filter(|u| !self.dismissed_updates.contains(u.component.label()))
+            .collect()
+    }
+
+    /// Current update for the modal, clamped if items were dismissed.
+    pub fn current_update(&self) -> Option<crate::update::UpdateInfo> {
+        let v = self.visible_updates();
+        if v.is_empty() {
+            None
+        } else {
+            let i = self.update_modal_idx.min(v.len() - 1);
+            Some(v[i].clone())
         }
     }
 

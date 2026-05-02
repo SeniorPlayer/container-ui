@@ -534,6 +534,64 @@ async fn handle_key<B: ratatui::backend::Backend>(
             }
             return Ok(());
         }
+        Mode::UpdatePrompt => {
+            let visible_n = app.visible_updates().len();
+            match code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+                    app.mode = Mode::Browse;
+                    app.update_notes_scroll = 0;
+                }
+                KeyCode::Right | KeyCode::Tab | KeyCode::Char('n') => {
+                    if visible_n > 0 {
+                        app.update_modal_idx = (app.update_modal_idx + 1) % visible_n;
+                        app.update_notes_scroll = 0;
+                    }
+                }
+                KeyCode::Left | KeyCode::BackTab | KeyCode::Char('p') => {
+                    if visible_n > 0 {
+                        app.update_modal_idx = (app.update_modal_idx + visible_n - 1) % visible_n;
+                        app.update_notes_scroll = 0;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    app.update_notes_scroll = app.update_notes_scroll.saturating_add(1);
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    app.update_notes_scroll = app.update_notes_scroll.saturating_sub(1);
+                }
+                KeyCode::PageDown => {
+                    app.update_notes_scroll = app.update_notes_scroll.saturating_add(10);
+                }
+                KeyCode::PageUp => {
+                    app.update_notes_scroll = app.update_notes_scroll.saturating_sub(10);
+                }
+                KeyCode::Char('L') | KeyCode::Char('l') => {
+                    if let Some(u) = app.current_update() {
+                        let label = u.component.label().to_string();
+                        app.dismissed_updates.insert(label.clone());
+                        app.set_status(format!("dismissed {label} for this session"));
+                    }
+                    let new_n = app.visible_updates().len();
+                    if new_n == 0 {
+                        app.mode = Mode::Browse;
+                    } else if app.update_modal_idx >= new_n {
+                        app.update_modal_idx = new_n - 1;
+                    }
+                    app.update_notes_scroll = 0;
+                }
+                KeyCode::Char('O') | KeyCode::Char('o') => {
+                    if let Some(u) = app.current_update() {
+                        match std::process::Command::new("open").arg(&u.release_url).status() {
+                            Ok(s) if s.success() => app.set_status(format!("opened {}", u.release_url)),
+                            Ok(s) => app.set_status(format!("open exited {s}")),
+                            Err(e) => app.set_status(format!("open error: {e}")),
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
         Mode::PromptStackName => {
             match code {
                 KeyCode::Esc => {
@@ -907,6 +965,15 @@ async fn handle_key<B: ratatui::backend::Backend>(
         }
         KeyCode::Char('?') => {
             app.mode = Mode::Help;
+        }
+        KeyCode::Char('U') => {
+            if app.visible_updates().is_empty() {
+                app.set_status("no updates available · cgui update for fresh check");
+            } else {
+                app.update_modal_idx = 0;
+                app.update_notes_scroll = 0;
+                app.mode = Mode::UpdatePrompt;
+            }
         }
         KeyCode::Char('X') => {
             app.profile_picker_selected = app
