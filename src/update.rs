@@ -152,18 +152,215 @@ async fn check_component(
 
 /// Pick the asset cgui should download for `c`. For Apple's container we
 /// require the **signed** installer; we deliberately refuse the unsigned
-/// variant to keep the install path safe by default.
+/// variant to keep the install path safe by default. For cgui itself we
+/// look for an OS+arch matched archive or raw binary.
 fn pick_signed_asset(c: Component, assets: &[GhAsset]) -> Option<SignedAsset> {
-    let needle = match c {
-        Component::AppleContainer => "installer-signed.pkg",
-        Component::CguiSelf => return None, // self-update handled separately (phase 5)
+    match c {
+        Component::AppleContainer => {
+            let a = assets.iter().find(|a| a.name.contains("installer-signed.pkg"))?;
+            Some(SignedAsset {
+                name: a.name.clone(),
+                url: a.browser_download_url.clone(),
+                size: a.size,
+            })
+        }
+        Component::CguiSelf => pick_self_asset(assets),
+    }
+}
+
+/// Pick the most appropriate cgui release asset for the current host.
+/// Preference order:
+///   1. exact `<arch>-apple-<os>` archive (e.g. `cgui-aarch64-apple-darwin.tar.gz`)
+///   2. anything mentioning `macos` / `darwin` (when on macOS)
+///   3. a bare `cgui` binary
+///
+/// Returns None if no plausible asset is published — phase 5's self-update
+/// will surface a clean "no asset" message instead of doing anything risky.
+fn pick_self_asset(assets: &[GhAsset]) -> Option<SignedAsset> {
+    let arch = std::env::consts::ARCH;
+    let os = std::env::consts::OS;
+    let exact = format!("{arch}-apple-{os}");
+    let on_macos = os == "macos";
+
+    // 1. exact triple match
+    if let Some(a) = assets.iter().find(|a| a.name.to_lowercase().contains(&exact)) {
+        return Some(SignedAsset {
+            name: a.name.clone(),
+            url: a.browser_download_url.clone(),
+            size: a.size,
+        });
+    }
+    // 2. macOS-tagged archive
+    if on_macos {
+        if let Some(a) = assets.iter().find(|a| {
+            let n = a.name.to_lowercase();
+            n.contains("cgui") && (n.contains("macos") || n.contains("darwin"))
+        }) {
+            return Some(SignedAsset {
+                name: a.name.clone(),
+                url: a.browser_download_url.clone(),
+                size: a.size,
+            });
+        }
+    }
+    // 3. bare `cgui` binary asset
+    if let Some(a) = assets.iter().find(|a| a.name == "cgui") {
+        return Some(SignedAsset {
+            name: a.name.clone(),
+            url: a.browser_download_url.clone(),
+            size: a.size,
+        });
+    }
+    None
+}
+
+/// How cgui itself was installed — drives the self-update route.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum CguiInstallMethod {
+    /// Replace the binary in place (atomic rename over `current_exe`).
+    Binary,
+    /// `brew upgrade cgui` (no sudo, brew handles it).
+    Brew,
+    /// Cargo-installed; cgui shouldn't manage cargo state, just suggest
+    /// the right command.
+    Cargo,
+}
+
+pub fn cgui_install_method() -> CguiInstallMethod {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return CguiInstallMethod::Binary,
     };
-    let a = assets.iter().find(|a| a.name.contains(needle))?;
-    Some(SignedAsset {
-        name: a.name.clone(),
-        url: a.browser_download_url.clone(),
-        size: a.size,
-    })
+    let path = exe.display().to_string();
+    if path.contains("/Cellar/")
+        || path.contains("/opt/homebrew/")
+        || path.contains("/.linuxbrew/")
+    {
+        return CguiInstallMethod::Brew;
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let cargo_bin = std::path::PathBuf::from(home).join(".cargo").join("bin");
+        if exe.starts_with(&cargo_bin) {
+            return CguiInstallMethod::Cargo;
+        }
+    }
+    CguiInstallMethod::Binary
+}
+
+/// Atomic in-place replacement of cgui's running binary. Handles raw-binary
+/// assets and `*.tar.gz` / `*.tgz` archives that contain a `cgui` at any
+/// depth. Sequence:
+///
+/// 1. (if archive) extract via `tar -xzf` to a sibling tmp dir
+/// 2. locate the `cgui` binary inside the extracted tree
+/// 3. copy bytes to `<current_exe>.new`, chmod 0755
+/// 4. `std::fs::rename` over the running binary — POSIX guarantees this is
+///    atomic on the same filesystem; the kernel keeps the running process's
+///    inode mapped so we don't crash mid-flight
+/// 5. clean up the staging tmp dir
+///
+/// Caller is expected to tell the user to restart cgui — verify_post_install
+/// can't compare versions in-process because we're still the old code.
+pub async fn install_self_binary(
+    downloaded: std::path::PathBuf,
+    sink: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) -> anyhow::Result<()> {
+    let exe = std::env::current_exe()?;
+    let parent = exe
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("current_exe has no parent dir: {}", exe.display()))?;
+
+    push(
+        &sink,
+        format!(
+            "→ replacing {} (running) — atomic rename, no sudo",
+            exe.display()
+        ),
+    );
+
+    // Resolve the actual binary, extracting the archive if needed.
+    let name_lc = downloaded
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_lowercase())
+        .unwrap_or_default();
+    let is_archive =
+        name_lc.ends_with(".tar.gz") || name_lc.ends_with(".tgz") || name_lc.ends_with(".tar");
+
+    let (binary_path, tmp_extract): (std::path::PathBuf, Option<std::path::PathBuf>) = if is_archive
+    {
+        let tmpdir = parent.join(".cgui-extract");
+        let _ = std::fs::remove_dir_all(&tmpdir);
+        std::fs::create_dir_all(&tmpdir)?;
+        push(&sink, format!("→ extracting {} → {}", name_lc, tmpdir.display()));
+        let tar_arg = if name_lc.ends_with(".tar") { "-xf" } else { "-xzf" };
+        let out = tokio::process::Command::new("tar")
+            .arg(tar_arg)
+            .arg(&downloaded)
+            .arg("-C")
+            .arg(&tmpdir)
+            .output()
+            .await?;
+        if !out.status.success() {
+            let _ = std::fs::remove_dir_all(&tmpdir);
+            return Err(anyhow::anyhow!(
+                "tar extract failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        let found = find_cgui_in(&tmpdir).ok_or_else(|| {
+            anyhow::anyhow!("no `cgui` binary found inside {}", downloaded.display())
+        })?;
+        (found, Some(tmpdir))
+    } else {
+        (downloaded.clone(), None)
+    };
+
+    let staged = exe.with_extension("new");
+    let _ = std::fs::remove_file(&staged);
+    std::fs::copy(&binary_path, &staged)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&staged)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&staged, perms)?;
+    }
+
+    std::fs::rename(&staged, &exe)?;
+    push(
+        &sink,
+        format!(
+            "✓ replaced {} — restart cgui to use the new version",
+            exe.display()
+        ),
+    );
+
+    if let Some(d) = tmp_extract {
+        let _ = std::fs::remove_dir_all(&d);
+    }
+    Ok(())
+}
+
+fn find_cgui_in(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let rd = std::fs::read_dir(dir).ok()?;
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.file_name() == Some(std::ffi::OsStr::new("cgui")) {
+            if let Ok(meta) = std::fs::metadata(&p) {
+                if meta.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+        if p.is_dir() {
+            if let Some(found) = find_cgui_in(&p) {
+                return Some(found);
+            }
+        }
+    }
+    None
 }
 
 /// Cap release notes so a runaway body can't blow up the modal or the

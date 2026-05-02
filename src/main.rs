@@ -133,15 +133,19 @@ async fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>) -> Res
                     app.reload_stacks();
                 }
                 // Queued install: if `[I]` triggered the download and it
-                // succeeded with a cached path, run the suspend+sudo dance
-                // now. Failure (download err) clears the queue silently.
+                // succeeded with a cached path, run the appropriate install
+                // route now (sudo installer for the runtime; atomic-replace
+                // for cgui itself). Failure clears the queue silently.
                 if app.op_kind == OperationKind::UpdateDownload && app.install_after_download {
                     let path = app.download_result.lock().ok().and_then(|g| g.clone());
-                    match path {
-                        Some(p) => {
+                    match (path, app.install_component) {
+                        (Some(p), Some(update::Component::AppleContainer)) => {
                             install_pkg(term, &mut app, p).await?;
                         }
-                        None => {
+                        (Some(p), Some(update::Component::CguiSelf)) => {
+                            install_self(&mut app, p).await;
+                        }
+                        _ => {
                             app.set_status("install cancelled (download failed)");
                             app.install_after_download = false;
                             app.install_component = None;
@@ -612,30 +616,60 @@ async fn handle_key<B: ratatui::backend::Backend>(
                 }
                 KeyCode::Char('I') | KeyCode::Char('i') => {
                     if let Some(u) = app.current_update() {
-                        // Brew path skips the download: brew owns the
-                        // asset itself.
-                        if update::install_kind() == update::InstallKind::Brew {
-                            // Stash target so the post-run verify knows what to compare.
-                            app.install_component = Some(u.component);
-                            app.install_expected = Some(u.latest.clone());
-                            install_brew(term, app, u.component).await?;
-                            app.mode = Mode::Browse;
-                            return Ok(());
+                        match u.component {
+                            update::Component::AppleContainer => {
+                                // Brew path skips the download: brew owns the asset itself.
+                                if update::install_kind() == update::InstallKind::Brew {
+                                    app.install_component = Some(u.component);
+                                    app.install_expected = Some(u.latest.clone());
+                                    install_brew(term, app, u.component).await?;
+                                    app.mode = Mode::Browse;
+                                    return Ok(());
+                                }
+                                if u.asset.is_none() {
+                                    app.set_status(format!(
+                                        "no signed installer asset for {} {}",
+                                        u.component.label(),
+                                        u.latest
+                                    ));
+                                    return Ok(());
+                                }
+                                app.install_component = Some(u.component);
+                                app.install_expected = Some(u.latest.clone());
+                                app.install_after_download = true;
+                                start_update_download(app, pull_handle, &u, true);
+                            }
+                            update::Component::CguiSelf => {
+                                match update::cgui_install_method() {
+                                    update::CguiInstallMethod::Brew => {
+                                        app.install_component = Some(u.component);
+                                        app.install_expected = Some(u.latest.clone());
+                                        install_brew(term, app, u.component).await?;
+                                        app.mode = Mode::Browse;
+                                        return Ok(());
+                                    }
+                                    update::CguiInstallMethod::Cargo => {
+                                        app.set_status(
+                                            "cargo-installed cgui — upgrade with `cargo install cgui --force`",
+                                        );
+                                        return Ok(());
+                                    }
+                                    update::CguiInstallMethod::Binary => {
+                                        if u.asset.is_none() {
+                                            app.set_status(format!(
+                                                "no binary asset published for cgui {} — `cargo install` from source",
+                                                u.latest
+                                            ));
+                                            return Ok(());
+                                        }
+                                        app.install_component = Some(u.component);
+                                        app.install_expected = Some(u.latest.clone());
+                                        app.install_after_download = true;
+                                        start_update_download(app, pull_handle, &u, true);
+                                    }
+                                }
+                            }
                         }
-                        if u.asset.is_none() {
-                            app.set_status(format!(
-                                "no signed installer asset for {} {}",
-                                u.component.label(),
-                                u.latest
-                            ));
-                            return Ok(());
-                        }
-                        // Pkg path: queue the install to fire after the
-                        // download lands (or immediately if cached).
-                        app.install_component = Some(u.component);
-                        app.install_expected = Some(u.latest.clone());
-                        app.install_after_download = true;
-                        start_update_download(app, pull_handle, &u, true);
                     }
                 }
                 _ => {}
@@ -1567,6 +1601,30 @@ async fn install_pkg<B: ratatui::backend::Backend>(
         Err(e) => app.set_status(format!("installer spawn error: {e}")),
     }
     Ok(())
+}
+
+/// Self-update: atomic-replace the running cgui binary with the downloaded
+/// asset. The TUI stays up — no terminal teardown is needed because there's
+/// no interactive prompt and POSIX rename is instant. After replacement we
+/// can't call ourselves to verify (we'd be the old code), so we just tell
+/// the user to restart.
+async fn install_self(app: &mut App, downloaded: std::path::PathBuf) {
+    let expected = app.install_expected.clone().unwrap_or_default();
+    match update::install_self_binary(downloaded, app.pull_log.clone()).await {
+        Ok(()) => {
+            app.set_status(format!(
+                "✓ replaced cgui binary — restart to use {expected}"
+            ));
+            app.updates
+                .retain(|u| u.component != update::Component::CguiSelf);
+            app.prefs.update_cache.retain(|c| c.component != "cgui");
+            app.prefs.save();
+        }
+        Err(e) => app.set_status(format!("self-update failed: {e}")),
+    }
+    app.install_after_download = false;
+    app.install_component = None;
+    app.install_expected = None;
 }
 
 /// Brew path: no sudo, no download. Suspends the TUI just so brew's progress

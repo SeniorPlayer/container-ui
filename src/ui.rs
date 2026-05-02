@@ -1495,11 +1495,21 @@ fn draw_update_prompt(f: &mut Frame, app: &App, area: Rect) {
         return;
     };
 
-    let install_hint = match crate::update::install_kind() {
-        crate::update::InstallKind::Brew => "I brew upgrade · ",
-        crate::update::InstallKind::Pkg => match &u.asset {
-            Some(_) => "I install (sudo) · D download · ",
-            None => "",
+    let install_hint = match u.component {
+        crate::update::Component::AppleContainer => match crate::update::install_kind() {
+            crate::update::InstallKind::Brew => "I brew upgrade · ",
+            crate::update::InstallKind::Pkg => match &u.asset {
+                Some(_) => "I install (sudo) · D download · ",
+                None => "",
+            },
+        },
+        crate::update::Component::CguiSelf => match crate::update::cgui_install_method() {
+            crate::update::CguiInstallMethod::Brew => "I brew upgrade · ",
+            crate::update::CguiInstallMethod::Cargo => "I cargo hint · ",
+            crate::update::CguiInstallMethod::Binary => match &u.asset {
+                Some(_) => "I replace binary · D download · ",
+                None => "I (no asset — `cargo install`) · ",
+            },
         },
     };
     let title = format!(
