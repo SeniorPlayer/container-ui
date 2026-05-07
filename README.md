@@ -18,6 +18,8 @@ with a **Docker-compatible command shim** so muscle memory keeps working.
  q quit · ←→ tabs · ↑↓ select · r refresh · s start · x stop · K kill · d delete · l logs · a all
 ```
 
+> **Prefer a GUI?** [`cgui-visual`](https://github.com/elementalcollision/cgui-visual) is the visual companion — native macOS desktop app, same workflows, reads the same `~/.config/cgui/stacks/*.toml`. Use either or both.
+
 ## Why
 
 Apple's `container` is great but CLI-only. `cgui` gives you:
