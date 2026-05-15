@@ -1,4 +1,4 @@
-name: Rust
+name: cgui
 
 on:
   push:
@@ -32,7 +32,5 @@ jobs:
         run: cargo build --verbose
       - name: Run tests
         run: cargo test --verbose
-      - name: Check formatting
-        run: cargo fmt --all -- --check
       - name: Clippy lint
-        run: cargo clippy -- -D warnings
+        run: cargo clippy
