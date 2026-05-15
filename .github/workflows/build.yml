@@ -28,13 +28,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-
       - name: Build
         run: cargo build --verbose
-
       - name: Run tests
         run: cargo test --verbose
-
       - name: Clippy lint
         run: cargo clippy
 
@@ -45,52 +42,45 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 
       - name: Set version env
         run: echo "APP_VERSION=${{ github.event.inputs.version }}" >> $GITHUB_ENV
 
+      - name: Clippy lint
+        run: cargo clippy
+      - name: Run tests
+        run: cargo test --verbose
+
       - name: Build release binary (macOS)
         run: cargo build --release --verbose
+      
+      - name: Get project name from Cargo.toml
+        id: cargo_meta
+        run: |
+          BIN_NAME=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].name')
+          echo "BIN_NAME=${BIN_NAME}" >> $GITHUB_ENV
 
       - name: Package artifact
         run: |
-          BIN_NAME=$(basename $GITHUB_WORKSPACE)
           ARCHIVE_NAME="${BIN_NAME}-${APP_VERSION}-macos.tar.gz"
           cd target/release
           tar czf "../../${ARCHIVE_NAME}" "${BIN_NAME}"
           echo "ASSET=${ARCHIVE_NAME}" >> $GITHUB_ENV
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos
-          path: ${{ env.ASSET }}
-
-  create-release:
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Display structure of downloaded files
-        run: ls -R artifacts
-
       - name: Create Git tag
         run: |
-          git tag v${{ github.event.inputs.version }}
-          git push origin v${{ github.event.inputs.version }}
+          git tag v${{ env.APP_VERSION }}
+          git push origin v${{ env.APP_VERSION }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ github.event.inputs.version }}
-          name: v${{ github.event.inputs.version }}
-          files: artifacts/**/*
+          tag_name: v${{ env.APP_VERSION }}
+          name: v${{ env.APP_VERSION }}
+          files: ${{ env.ASSET }}
           draft: false
           prerelease: false
         env:
