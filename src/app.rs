@@ -81,6 +81,8 @@ pub enum Mode {
     PromptStackName,
     /// Parsed Trivy scan results modal.
     TrivyResult,
+    /// Confirm prompt
+    Confirm,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -766,7 +768,9 @@ pub struct RefreshResult {
     pub volumes: Option<Vec<container::Volume>>,
     pub networks: Option<Vec<container::Network>>,
     pub stats: Option<Vec<container::StatRow>>,
+    pub stats_dura:Option<f64>,
     pub error: Option<String>,
+    last_fetch:Option<Instant>,
 }
 
 /// Run every list call in parallel and collect the results. Errors on any
@@ -789,6 +793,18 @@ pub async fn fetch_all(show_all: bool) -> RefreshResult {
     out.volumes = v.ok();
     out.networks = n.ok();
     out.stats = s.ok();
+    if let Some(last_fetch) = out.last_fetch {
+        out.stats_dura = Some(last_fetch.elapsed().as_millis() as f64);
+    }else{
+        out.stats_dura = Some(1000_000_000_000f64);
+    };
+    out.last_fetch = Some(Instant::now());
+    if let Some(stats) = out.stats.as_mut() {
+        for v in stats.iter_mut() {
+                v.cpu_percent = (v.cpu_usage_usec-v.cpu_usage_usec_last)as f64 / out.stats_dura.unwrap() ;
+                v.cpu_usage_usec_last = v.cpu_usage_usec;
+        }
+    }
     out
 }
 

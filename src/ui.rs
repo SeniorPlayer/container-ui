@@ -53,6 +53,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::ProfilePicker => draw_profile_picker(f, app, area),
         Mode::PromptStackName => draw_stack_name_prompt(f, app, area),
         Mode::TrivyResult => draw_trivy_result(f, app, area),
+        Mode::Confirm => draw_confirm_overlay(f, app, area),
         Mode::Browse | Mode::Filter | Mode::LogSearch => {}
     }
 }
@@ -987,6 +988,37 @@ fn draw_prompt_overlay(f: &mut Frame, app: &App, area: Rect) {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(app.theme.accent))
             .title(" Pull image "),
+    );
+    f.render_widget(body, r);
+}
+
+
+fn draw_confirm_overlay(f: &mut Frame, app: &App, area: Rect) {
+    let r = centered(area, 60, 25);
+    f.render_widget(Clear, r);
+
+    let body = Paragraph::new(vec![
+        Line::from(Span::styled(
+            "Input:",
+            Style::default().fg(app.theme.primary),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(&app.prompt_buf, Style::default().fg(app.theme.warning)),
+            Span::styled("█", Style::default().fg(app.theme.warning)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("Enter y/n · Esc cancel"),
+            Style::default().fg(app.theme.muted),
+        )),
+    ])
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(app.theme.accent))
+            .title(" Confirm operation"),
     );
     f.render_widget(body, r);
 }

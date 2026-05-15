@@ -65,9 +65,6 @@ fn leave_terminal() -> Result<()> {
 
 async fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>) -> Result<()> {
     let mut app = App::new();
-    // First refresh runs inline so the UI has data before the first draw.
-    let initial = app::fetch_all(app.show_all).await;
-    app.apply_refresh(initial);
 
     let mut events = EventStream::new();
     let mut tick = interval(Duration::from_millis(2000));
@@ -77,7 +74,9 @@ async fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>) -> Res
 
     let mut pull_handle: Option<tokio::task::JoinHandle<Result<()>>> = None;
     let mut log_handle: Option<tokio::task::JoinHandle<Result<()>>> = None;
-    let mut refresh_handle: Option<tokio::task::JoinHandle<app::RefreshResult>> = None;
+    // First refresh runs inline so the UI has data before the first draw.
+    let mut refresh_handle: Option<tokio::task::JoinHandle<app::RefreshResult>> = 
+        Some(tokio::spawn(app::fetch_all(app.show_all)));
 
     // Background watchers: filesystem events + restart/healthcheck loop.
     let (watch_tx, mut watch_rx) =
@@ -231,7 +230,7 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) {
     // Other overlays swallow left-clicks rather than mis-firing on chrome.
     if matches!(
         app.mode,
-        Mode::Detail | Mode::PromptPull | Mode::PromptBuild | Mode::PullProgress
+        Mode::Detail | Mode::PromptPull | Mode::PromptBuild | Mode::PullProgress | Mode::Confirm 
     ) {
         return;
     }
@@ -266,7 +265,7 @@ fn wheel(app: &mut App, delta: i32) {
     match app.mode {
         Mode::Detail => bump(&mut app.detail_scroll),
         Mode::PullProgress => bump(&mut app.op_scroll),
-        Mode::Help | Mode::PromptPull | Mode::PromptBuild | Mode::ContextMenu => {}
+        Mode::Help | Mode::PromptPull | Mode::PromptBuild | Mode::ContextMenu | Mode::Confirm => {}
         _ => {
             if app.tab == Tab::Logs {
                 bump(&mut app.log_scroll);
@@ -366,7 +365,11 @@ async fn invoke_context_action(app: &mut App, action: ContextAction) {
         ContextAction::Start => batch_action(app, "start").await,
         ContextAction::Stop => batch_action(app, "stop").await,
         ContextAction::Kill => batch_action(app, "kill").await,
-        ContextAction::Delete => batch_action(app, "delete").await,
+        ContextAction::Delete => {
+            app.prompt_buf.clear();
+            app.mode = Mode::Confirm;
+            app.set_status("Confirm to delete container.");
+        }
         ContextAction::Exec => app.set_status("exec from menu: press 'e' on the row"),
         ContextAction::Pull => {
             app.prompt_buf.clear();
@@ -512,6 +515,33 @@ async fn handle_key<B: ratatui::backend::Backend>(
                 }
                 KeyCode::PageUp => {
                     app.detail_scroll = app.detail_scroll.saturating_sub(20);
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+        Mode::Confirm => {
+            match code {
+                KeyCode::Esc => {
+                    app.prompt_buf.clear();
+                    app.mode = Mode::Browse;
+                    app.reset_status();
+                }
+                KeyCode::Enter => {
+                    let input = std::mem::take(&mut app.prompt_buf);
+                    app.recent_idx = None;
+                    if input.trim().eq_ignore_ascii_case("y") {
+                        batch_action(app, "delete").await;
+                    }
+                    app.mode = Mode::Browse;
+                    app.reset_status();
+                    return Ok(());
+                }
+                KeyCode::Backspace => {
+                    app.prompt_buf.pop();
+                }
+                KeyCode::Char(c) => {
+                    app.prompt_buf.push(c);
                 }
                 _ => {}
             }
@@ -971,7 +1001,11 @@ async fn handle_key<B: ratatui::backend::Backend>(
         KeyCode::Char('s') if app.tab == Tab::Containers => batch_action(app, "start").await,
         KeyCode::Char('x') if app.tab == Tab::Containers => batch_action(app, "stop").await,
         KeyCode::Char('K') if app.tab == Tab::Containers => batch_action(app, "kill").await,
-        KeyCode::Char('d') if app.tab == Tab::Containers => batch_action(app, "delete").await,
+        KeyCode::Char('d') if app.tab == Tab::Containers => {
+            app.prompt_buf.clear();
+            app.mode = Mode::Confirm;
+            app.set_status("Confirm to delete container.");
+        }
         KeyCode::Char('l') if app.tab == Tab::Containers => load_logs(app, log_handle).await,
         KeyCode::Char('F') if app.tab == Tab::Containers => follow_logs(app, log_handle).await,
         KeyCode::Char('F') if app.tab == Tab::Logs => {

@@ -54,11 +54,14 @@ pub struct Network {
 pub struct StatRow {
     pub id: String,
     pub name: String,
+    #[serde(rename = "cpuUsageUsec", alias = "cpu_usage_usec", alias = "CPU_USAGE")]
+    pub cpu_usage_usec: u64,
+    pub cpu_usage_usec_last: u64,
     #[serde(rename = "cpuPercent", alias = "cpu_percent", alias = "CPU")]
     pub cpu_percent: f64,
-    #[serde(rename = "memoryUsage", alias = "memory_usage", alias = "MemUsage")]
+    #[serde(rename = "memoryUsageBytes", alias = "memory_usage", alias = "MemUsage")]
     pub memory_usage: u64,
-    #[serde(rename = "memoryLimit", alias = "memory_limit", alias = "MemLimit")]
+    #[serde(rename = "memoryLimitBytes", alias = "memory_limit", alias = "MemLimit")]
     pub memory_limit: u64,
 }
 
