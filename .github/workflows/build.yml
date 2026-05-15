@@ -16,21 +16,82 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: write
+
 jobs:
-  build:
+  ci:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Set build version
-        run: echo "APP_VERSION=${{ github.event.inputs.version || 'dev' }}" >> $GITHUB_ENV
+
       - name: Build
         run: cargo build --verbose
+
       - name: Run tests
         run: cargo test --verbose
+
       - name: Clippy lint
         run: cargo clippy
+
+  release:
+    needs: ci
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Set version env
+        run: echo "APP_VERSION=${{ github.event.inputs.version }}" >> $GITHUB_ENV
+
+      - name: Build release binary (macOS)
+        run: cargo build --release --verbose
+
+      - name: Package artifact
+        run: |
+          BIN_NAME=$(basename $GITHUB_WORKSPACE)
+          ARCHIVE_NAME="${BIN_NAME}-${APP_VERSION}-macos.tar.gz"
+          cd target/release
+          tar czf "../../${ARCHIVE_NAME}" "${BIN_NAME}"
+          echo "ASSET=${ARCHIVE_NAME}" >> $GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: ${{ env.ASSET }}
+
+  create-release:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
+      - name: Create Git tag
+        run: |
+          git tag v${{ github.event.inputs.version }}
+          git push origin v${{ github.event.inputs.version }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.event.inputs.version }}
+          name: v${{ github.event.inputs.version }}
+          files: artifacts/**/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
